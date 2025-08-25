@@ -103,11 +103,11 @@ install_packages() {
 
 # Function to install GPU drivers
 install_gpu_drivers() {
-    info "Detecting and installing appropriate GPU drivers..."
+    info "Installing NVIDIA driver 575-open..."
     {
-        sudo ubuntu-drivers install
+        sudo apt install -y nvidia-driver-575-open
     } >> "$LOG_FILE" 2>&1
-    success "GPU drivers installed successfully."
+    success "NVIDIA driver 575-open installed successfully."
 }
 
 # Function to install Rust
@@ -150,10 +150,10 @@ install_just() {
 
 # Function to install CUDA Toolkit
 install_cuda() {
-    if is_package_installed "cuda-toolkit"; then
-        info "CUDA Toolkit is already installed. Skipping CUDA installation."
+    if is_package_installed "cuda-toolkit-12-9"; then
+        info "CUDA Toolkit 12.9 is already installed. Skipping CUDA installation."
     else
-        info "Installing CUDA Toolkit and dependencies..."
+        info "Installing CUDA Toolkit 12.9 and dependencies..."
         {
             local distribution
             distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"'| tr -d '\.')
@@ -162,9 +162,9 @@ install_cuda() {
             sudo dpkg -i cuda-keyring_1.1-1_all.deb
             rm cuda-keyring_1.1-1_all.deb
             sudo apt-get update
-            sudo apt-get install -y cuda-toolkit
+            sudo apt-get install -y cuda-toolkit-12-9
         } >> "$LOG_FILE" 2>&1
-        success "CUDA Toolkit installed successfully."
+        success "CUDA Toolkit 12.9 installed successfully."
     fi
 }
 
@@ -247,6 +247,104 @@ install_nvidia_container_toolkit() {
     } >> "$LOG_FILE" 2>&1
 
     success "NVIDIA Container Toolkit installed successfully."
+}
+
+install_rust_deps() {
+    info "Installing Rust dependencies..."
+
+    # Source the Rust environment
+    source "$HOME/.cargo/env" || {
+        error "Failed to source $HOME/.cargo/env. Ensure Rust is installed."
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+
+    # Check and install cargo if not present
+    if ! command_exists cargo; then
+        if ! check_dpkg_status; then
+            exit $EXIT_DPKG_ERROR
+        fi
+        info "Installing cargo..."
+        apt update >> "$LOG_FILE" 2>&1 || {
+            error "Failed to update package list for cargo"
+            exit $EXIT_DEPENDENCY_FAILED
+        }
+        apt install -y cargo >> "$LOG_FILE" 2>&1 || {
+            error "Failed to install cargo"
+            if apt install -y cargo 2>&1 | grep -q "dpkg was interrupted"; then
+                exit $EXIT_DPKG_ERROR
+            fi
+            exit $EXIT_DEPENDENCY_FAILED
+        }
+    fi
+
+    # Always install rzup and the RISC Zero Rust toolchain
+    info "Installing rzup..."
+    curl -L https://risczero.com/install | bash >> "$LOG_FILE" 2>&1 || {
+        error "Failed to install rzup"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+    # Update PATH in the current shell
+    export PATH="$PATH:/root/.risc0/bin"
+    # Source bashrc to ensure environment is updated
+    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
+        error "Failed to source ~/.bashrc after rzup install"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+    # Install RISC Zero Rust toolchain
+    rzup install rust >> "$LOG_FILE" 2>&1 || {
+        error "Failed to install RISC Zero Rust toolchain"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+
+    # Detect the RISC Zero toolchain
+    TOOLCHAIN=$(rustup toolchain list | grep risc0 | head -1)
+    if [ -z "$TOOLCHAIN" ]; then
+        error "No RISC Zero toolchain found after installation"
+        exit $EXIT_DEPENDENCY_FAILED
+    fi
+    info "Using RISC Zero toolchain: $TOOLCHAIN"
+
+    # Install cargo-risczero
+    if ! command_exists cargo-risczero; then
+        info "Installing cargo-risczero..."
+        cargo install cargo-risczero >> "$LOG_FILE" 2>&1 || {
+            error "Failed to install cargo-risczero"
+            exit $EXIT_DEPENDENCY_FAILED
+        }
+        rzup install cargo-risczero >> "$LOG_FILE" 2>&1 || {
+            error "Failed to install cargo-risczero via rzup"
+            exit $EXIT_DEPENDENCY_FAILED
+        }
+    fi
+
+    # Install bento-client with the RISC Zero toolchain
+    info "Installing bento-client..."
+    RUSTUP_TOOLCHAIN=$TOOLCHAIN cargo install --locked --git https://github.com/risc0/risc0 bento-client --branch release-2.3 --bin bento_cli
+ >> "$LOG_FILE" 2>&1 || {
+        error "Failed to install bento-client"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+    # Persist PATH for cargo binaries
+    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
+        error "Failed to source ~/.bashrc after installing bento-client"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+
+    # Install boundless-cli
+    info "Installing boundless-cli..."
+    cargo install --locked boundless-cli >> "$LOG_FILE" 2>&1 || {
+        error "Failed to install boundless-cli"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+    # Update PATH for boundless-cli
+    export PATH="$PATH:/root/.cargo/bin"
+    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
+        error "Failed to source ~/.bashrc after installing boundless-cli"
+        exit $EXIT_DEPENDENCY_FAILED
+    }
+
+    success "Rust dependencies installed"
 }
 
 # Function to configure Docker daemon for NVIDIA
@@ -341,6 +439,8 @@ install_just
 # Install CUDA Toolkit
 install_cuda
 
+# Install rust_deps
+install_rust_deps
 # Cleanup
 cleanup
 

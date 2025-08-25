@@ -244,17 +244,32 @@ install_basic_deps() {
 
 # Install GPU drivers
 install_gpu_drivers() {
-    info "Installing GPU drivers..."
+    info "Installing NVIDIA drivers version 575-open..."
     if ! check_dpkg_status; then
         exit $EXIT_DPKG_ERROR
     fi
     {
-        if ! ubuntu-drivers install 2>&1; then
-            error "Failed to install GPU drivers"
+        # Add NVIDIA repository
+        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+        curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+        
+        # Update package list
+        if ! apt update -y 2>&1; then
+            error "Failed to update package list for NVIDIA drivers"
+            exit $EXIT_DEPENDENCY_FAILED
+        fi
+        
+        # Install specific NVIDIA driver version
+        if ! apt install -y nvidia-driver-575-open 2>&1; then
+            error "Failed to install NVIDIA driver 575-open"
+            if apt install -y nvidia-driver-575-open 2>&1 | grep -q "dpkg was interrupted"; then
+                exit $EXIT_DPKG_ERROR
+            fi
             exit $EXIT_GPU_ERROR
         fi
     } >> "$LOG_FILE" 2>&1
-    success "GPU drivers installed"
+    success "NVIDIA drivers 575-open installed"
 }
 
 # Install Docker
@@ -367,11 +382,11 @@ install_just() {
 
 # Install CUDA Toolkit
 install_cuda() {
-    if is_package_installed "cuda-toolkit"; then
-        info "CUDA Toolkit already installed"
+    if is_package_installed "cuda-toolkit-12-9"; then
+        info "CUDA Toolkit 12.9 already installed"
         return
     fi
-    info "Installing CUDA Toolkit..."
+    info "Installing CUDA Toolkit 12.9..."
     if ! check_dpkg_status; then
         exit $EXIT_DPKG_ERROR
     fi
@@ -391,15 +406,19 @@ install_cuda() {
             error "Failed to update package list for CUDA"
             exit $EXIT_DEPENDENCY_FAILED
         fi
-        if ! apt-get install -y cuda-toolkit 2>&1; then
-            error "Failed to install CUDA Toolkit"
-            if apt-get install -y cuda-toolkit 2>&1 | grep -q "dpkg was interrupted"; then
+        if ! apt-get install -y cuda-toolkit-12-9 2>&1; then
+            error "Failed to install CUDA Toolkit 12.9"
+            if apt-get install -y cuda-toolkit-12-9 2>&1 | grep -q "dpkg was interrupted"; then
                 exit $EXIT_DPKG_ERROR
             fi
             exit $EXIT_DEPENDENCY_FAILED
         fi
+        
+        # Set up CUDA environment variables
+        echo 'export PATH=/usr/local/cuda-12.9/bin:$PATH' >> ~/.bashrc
+        echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
     } >> "$LOG_FILE" 2>&1
-    success "CUDA Toolkit installed"
+    success "CUDA Toolkit 12.9 installed"
 }
 
 # Install Rust dependencies
