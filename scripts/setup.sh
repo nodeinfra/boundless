@@ -164,6 +164,15 @@ install_cuda() {
             sudo apt-get update
             sudo apt-get install -y cuda-toolkit-12-9
         } >> "$LOG_FILE" 2>&1
+        
+        # Add CUDA paths to bashrc for permanent setup
+        echo 'export PATH=/usr/local/cuda-12.9/bin:$PATH' >> ~/.bashrc
+        echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+        
+        # Export for current session
+        export PATH=/usr/local/cuda-12.9/bin:$PATH
+        export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH
+        
         success "CUDA Toolkit 12.9 installed successfully."
     fi
 }
@@ -283,13 +292,10 @@ install_rust_deps() {
         error "Failed to install rzup"
         exit $EXIT_DEPENDENCY_FAILED
     }
-    # Update PATH in the current shell
-    export PATH="$PATH:/root/.risc0/bin"
-    # Source bashrc to ensure environment is updated
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after rzup install"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+         # Update PATH in the current shell
+     export PATH="$PATH:$HOME/.risc0/bin"
+     # Add to bashrc for permanent setup
+     echo 'export PATH="$PATH:$HOME/.risc0/bin"' >> ~/.bashrc
     # Install RISC Zero Rust toolchain
     rzup install rust >> "$LOG_FILE" 2>&1 || {
         error "Failed to install RISC Zero Rust toolchain"
@@ -324,12 +330,10 @@ install_rust_deps() {
         error "Failed to install bento-client"
         exit $EXIT_DEPENDENCY_FAILED
     }
-    # Persist PATH for cargo binaries
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after installing bento-client"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+         # Persist PATH for cargo binaries
+     echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
+     # Export for current session
+     export PATH="$HOME/.cargo/bin:$PATH"
 
     # Install boundless-cli
     info "Installing boundless-cli..."
@@ -337,12 +341,8 @@ install_rust_deps() {
         error "Failed to install boundless-cli"
         exit $EXIT_DEPENDENCY_FAILED
     }
-    # Update PATH for boundless-cli
-    export PATH="$PATH:/root/.cargo/bin"
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after installing boundless-cli"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+         # Update PATH for boundless-cli
+     export PATH="$PATH:$HOME/.cargo/bin"
 
     success "Rust dependencies installed"
 }
