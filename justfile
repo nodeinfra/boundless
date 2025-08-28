@@ -380,7 +380,11 @@ bento action="up" env_file="" compose_flags="" detached="true":
         fi
     elif [ "{{action}}" = "clean" ]; then
         echo "Stopping and cleaning Docker Compose services"
+        
         if docker compose {{compose_flags}} $ENV_FILE_ARG down -v; then
+            echo "Removing broker database..."
+            docker run --rm -v broker-data:/db alpine sh -c "rm -f /db/broker.db" 2>/dev/null || true
+            echo "Broker database removed."
             echo "Docker Compose services have been stopped and volumes have been removed."
         else
             echo "Error: Failed to clean Docker Compose services."

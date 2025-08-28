@@ -1,5 +1,5 @@
 name: bento
-
+# Anchors:
 x-base-environment: &base-environment
   DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
   REDIS_URL: redis://${REDIS_HOST:-redis}:6379
@@ -11,7 +11,7 @@ x-base-environment: &base-environment
   RUST_BACKTRACE: 1
 
 x-agent-common: &agent-common
-  image: daw8n/risc0-agent:22.04-12.9.1-120-v3.0.1-comino
+  image: daw8n/risc0-agent:22.04-12.9.1-120-v3.0.1-nodeinfra-gpu
   runtime: nvidia
   restart: always
   depends_on:
@@ -21,13 +21,27 @@ x-agent-common: &agent-common
   environment:
     <<: *base-environment
 
+x-exec-agent-common: &exec-agent-common
+  <<: *agent-common
+  mem_limit: 16G
+  cpus: 8
+  runtime: nvidia
+  environment:
+    <<: *base-environment
+    LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
+    RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
+  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
+
 x-broker-environment: &broker-environment
   RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
+  # RUST_BACKTRACE: 1
   PRIVATE_KEY: ${PRIVATE_KEY}
   RPC_URL: ${RPC_URL}
   BOUNDLESS_MARKET_ADDRESS:
   SET_VERIFIER_ADDRESS:
   ORDER_STREAM_URL:
+  # TODO these env vars are temporary for handling cancellations. These should be removed when
+  # updated.
   POSTGRES_HOST:
   POSTGRES_DB:
   POSTGRES_PORT:
@@ -41,9 +55,6 @@ x-broker-common: &broker-common
     - gpu_prove_agent0
     - exec_agent0
     - exec_agent1
-    - exec_agent2
-    - exec_agent3
-    - join_agent
     - aux_agent
     - snark_agent
     - redis
@@ -64,7 +75,7 @@ services:
     mem_limit: 30G
     restart: always
     ports:
-      - "6379:6379"
+      - 6379:6379
     volumes:
       - redis-data:/data
     command: redis-server --maxmemory 30g --maxmemory-policy allkeys-lru
@@ -77,6 +88,8 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-taskdb}
       POSTGRES_USER: ${POSTGRES_USER:-worker}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    expose:
+      - "${POSTGRES_PORT:-5432}"
     ports:
       - "${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
     volumes:
@@ -104,63 +117,10 @@ services:
       retries: 5
 
   exec_agent0:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    depends_on:
-      - postgres
-      - redis
-      - minio
-    environment:
-      <<: *base-environment
-      RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-      JOIN_STREAM: 1
-      COPROC_STREAM: 1
-    entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21}
+    <<: *exec-agent-common
   exec_agent1:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    depends_on:
-      - postgres
-      - redis
-      - minio
-    environment:
-      <<: *base-environment
-      RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-      JOIN_STREAM: 1
-      COPROC_STREAM: 1
-    entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21}
+    <<: *exec-agent-common
 
-  exec_agent2:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    depends_on:
-      - postgres
-      - redis
-      - minio
-    environment:
-      <<: *base-environment
-      RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-      JOIN_STREAM: 1
-      COPROC_STREAM: 1
-    entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21}
-
-  exec_agent3:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    depends_on:
-      - postgres
-      - redis
-      - minio
-    environment:
-      <<: *base-environment
-      RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
-      JOIN_STREAM: 1
-      COPROC_STREAM: 1
-    entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21}
   aux_agent:
     <<: *agent-common
     mem_limit: 512M
@@ -172,22 +132,10 @@ services:
 
   gpu_prove_agent0:
     <<: *agent-common
+    runtime: nvidia
     mem_limit: 16G
     cpus: 8
     entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-
-  join_agent:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t join --redis-ttl ${REDIS_TTL:-57600}
     deploy:
       resources:
         reservations:
@@ -202,7 +150,10 @@ services:
     environment:
       <<: *base-environment
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
+
     ulimits:
+      # Needed for stark_verify bin
+      # TODO: this number was just guess and check found
       stack: 90000000
 
   rest_api:
@@ -226,15 +177,38 @@ services:
         source: ./broker.toml
         target: /app/broker.toml
       - broker-data:/db/
+    # Uncomment when using locally built set-builder and assessor guest programs
+    # - type: bind
+    #   source: ./target/riscv-guest/guest-set-builder/set-builder/riscv32im-risc0-zkvm-elf/release/set-builder.bin
+    #   target: /target/riscv-guest/guest-set-builder/set-builder/riscv32im-risc0-zkvm-elf/release/set-builder.bin
+    # - type: bind
+    #   source: ./target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
+    #   target: /target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
     environment:
       <<: *broker-environment
       PRIVATE_KEY: ${PRIVATE_KEY}
       RPC_URL: ${RPC_URL}
     entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
 
+# # Example second broker with different configuration
+# broker2:
+#   <<: *broker-common
+#   volumes:
+#     - type: bind
+#       source: ./broker2.toml
+#       target: /app/broker.toml
+#     - broker2-data:/db/
+#   environment:
+#     <<: *broker-environment
+#     # Note: use a different variable if you want to use different private keys in each broker
+#     PRIVATE_KEY: ${PRIVATE_KEY}
+#     RPC_URL: ${RPC_URL_2}
+#   entrypoint: /app/broker --db-url 'sqlite:///db/broker2.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
+
 volumes:
   redis-data:
   postgres-data:
   minio-data:
+  grafana-data:
   broker-data:
     external: true
