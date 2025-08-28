@@ -726,20 +726,12 @@ where
             );
             0 // Schedule the lock ASAP
         } else {
-            let target_min_price = config_min_mcycle_price
-                .saturating_mul(U256::from(proof_res.stats.total_cycles))
-                .div_ceil(ONE_MILLION)
-                + order_gas_cost;
-            tracing::debug!(
-                "Order {order_id} minimum profitable price: {} ETH",
-                format_ether(target_min_price)
+            
+            tracing::info!(
+                "INSTANT LOCK: Selecting order {order_id} at min price {} - ZKC Season Mode",
+                format_ether(U256::from(order.request.offer.minPrice))
             );
-
-            order
-                .request
-                .offer
-                .time_at_price(target_min_price)
-                .context("Failed to get target price timestamp")?
+            0 // 항상 즉시 잠금
         };
 
         let expiry_secs = order.request.offer.biddingStart + order.request.offer.lockTimeout as u64;
