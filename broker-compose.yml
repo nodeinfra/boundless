@@ -1,0 +1,123 @@
+name: boundless-broker
+
+# Anchors:
+x-base-environment: &base-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
+  REDIS_URL: redis://${REDIS_HOST:-redis}:6379
+  S3_URL: http://${MINIO_HOST:-minio}:9000
+  S3_BUCKET: ${MINIO_BUCKET:-workflow}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASS:-password}
+  RUST_LOG: ${RUST_LOG:-info}
+  RUST_BACKTRACE: 1
+
+x-broker-environment: &broker-environment
+  RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
+  PRIVATE_KEY: ${PRIVATE_KEY}
+  RPC_URL: ${RPC_URL}
+  BOUNDLESS_MARKET_ADDRESS: ${BOUNDLESS_MARKET_ADDRESS}
+  SET_VERIFIER_ADDRESS: ${SET_VERIFIER_ADDRESS}
+  ORDER_STREAM_URL: ${ORDER_STREAM_URL}
+  # HOST 설정 - 외부 agent 서버들이 접근할 수 있도록 Redis/PostgreSQL/MinIO를 바인딩
+  POSTGRES_HOST: ${POSTGRES_HOST:-0.0.0.0}
+  POSTGRES_DB: ${POSTGRES_DB:-taskdb}
+  POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+  POSTGRES_USER: ${POSTGRES_USER:-worker}
+  POSTGRES_PASS: ${POSTGRES_PASSWORD:-password}
+
+x-broker-common: &broker-common
+  restart: always
+  depends_on:
+    - rest_api
+    - redis
+    - postgres
+    - minio
+  profiles: [broker]
+  build:
+    context: .
+    dockerfile: dockerfiles/broker.dockerfile
+  mem_limit: 10G
+  cpus: 10
+  stop_grace_period: 3h
+  network_mode: host
+
+services:
+  redis:
+    hostname: ${REDIS_HOST:-redis}
+    image: ${REDIS_IMG:-redis:7.2.5-alpine3.19}
+    mem_limit: 50G
+    restart: always
+    ports:
+      - "0.0.0.0:6379:6379"  # 모든 인터페이스에서 접근 가능하도록 설정
+    volumes:
+      - redis-data:/data
+    command: redis-server --maxmemory 48g --maxmemory-policy allkeys-lru --bind 0.0.0.0
+
+  postgres:
+    hostname: ${POSTGRES_HOST:-postgres}
+    image: ${POSTGRES_IMG:-postgres:16.3-bullseye}
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-taskdb}
+      POSTGRES_USER: ${POSTGRES_USER:-worker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+    expose:
+      - "${POSTGRES_PORT:-5432}"
+    ports:
+      - "0.0.0.0:${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"  # 외부 접근 허용
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    command: -p ${POSTGRES_PORT:-5432} -c listen_addresses='*'
+
+  minio:
+    hostname: ${MINIO_HOST:-minio}
+    image: ${MINIO_IMG:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
+    restart: always
+    ports:
+      - "0.0.0.0:9000:9000"  # 외부 접근 허용
+      - "0.0.0.0:9001:9001"
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001" --address ":9000"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASS:-password}
+      - MINIO_DEFAULT_BUCKETS=${MINIO_BUCKET:-workflow}
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  rest_api:
+    image: risczero/risc0-bento-rest-api:2.3.1
+    restart: always
+    depends_on:
+      - postgres
+      - minio
+    mem_limit: 2G
+    cpus: 2
+    environment:
+      <<: *base-environment
+    ports:
+      - "0.0.0.0:8081:8081"  # 외부 접근 허용
+    entrypoint: /app/rest_api --bind-addr 0.0.0.0:8081 --snark-timeout ${SNARK_TIMEOUT:-180}
+
+  broker:
+    <<: *broker-common
+    volumes:
+      - type: bind
+        source: ./broker.toml
+        target: /app/broker.toml
+      - broker-data:/db/
+    environment:
+      <<: *broker-environment
+      PRIVATE_KEY: ${PRIVATE_KEY}
+      RPC_URL: ${RPC_URL}
+    entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
+
+volumes:
+  redis-data:
+  postgres-data:
+  minio-data:
+  broker-data:
