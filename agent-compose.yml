@@ -49,6 +49,18 @@ services:
             - driver: nvidia
               device_ids: ["0"]
               capabilities: [gpu]
+  join_agent:
+    <<: *agent-common
+    mem_limit: 16G
+    cpus: 8
+    entrypoint: /app/agent -t join --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
 
   # gpu_prove_agent2:
   #   <<: *agent-common
