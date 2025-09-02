@@ -3,7 +3,7 @@ name: boundless-agents
 # Anchors:
 x-base-environment: &base-environment
   DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-125.253.92.103}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
-  REDIS_URL: redis://${REDIS_HOST:-125.253.92.103}:6379
+  REDIS_URL: redis://${REDIS_HOST:-redis}:6379
   S3_URL: http://${MINIO_HOST:-125.253.92.103}:9000
   S3_BUCKET: ${MINIO_BUCKET:-workflow}
   S3_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
@@ -12,9 +12,11 @@ x-base-environment: &base-environment
   RUST_BACKTRACE: 1
 
 x-agent-common: &agent-common
-  image: daw8n/risc0-agent:22.04-12.9.1-120-v2.3.1-comino
+  image: daw8n/risc0-agent:22.04-12.9.1-120-v2.3.1-nodeinfra-gpu
   runtime: nvidia
   restart: always
+  depends_on:
+    - redis
   environment:
     <<: *base-environment
 
@@ -30,6 +32,16 @@ x-exec-agent-common: &exec-agent-common
   entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
 
 services:
+  redis:
+    hostname: ${REDIS_HOST:-redis}
+    image: ${REDIS_IMG:-redis:7.2.5-alpine3.19}
+    mem_limit: 30G
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --maxmemory 28g --maxmemory-policy allkeys-lru
   exec_agent0:
     <<: *exec-agent-common
 
@@ -42,18 +54,6 @@ services:
     mem_limit: 16G
     cpus: 8
     entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["0"]
-              capabilities: [gpu]
-  join_agent:
-    <<: *agent-common
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t join --redis-ttl ${REDIS_TTL:-57600}
     deploy:
       resources:
         reservations:
@@ -96,3 +96,6 @@ services:
     ulimits:
       # Needed for stark_verify bin
       stack: 90000000
+
+volumes:
+  redis-data:
