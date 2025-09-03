@@ -1,9 +1,10 @@
 name: bento
+
 # Anchors:
 x-base-environment: &base-environment
-  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-125.253.92.103}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
   REDIS_URL: redis://${REDIS_HOST:-redis}:6379
-  S3_URL: http://${MINIO_HOST:-minio}:9000
+  S3_URL: http://${MINIO_HOST:-125.253.92.103}:9000
   S3_BUCKET: ${MINIO_BUCKET:-workflow}
   S3_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
   S3_SECRET_KEY: ${MINIO_ROOT_PASS:-password}
@@ -11,13 +12,11 @@ x-base-environment: &base-environment
   RUST_BACKTRACE: 1
 
 x-agent-common: &agent-common
-  image: daw8n/risc0-agent:22.04-12.9.1-120-v2.3.1-comino
+  image: daw8n/risc0-agent:22.04-12.9.1-120-v2.3.1-nodeinfra-gpu
   runtime: nvidia
   restart: always
   depends_on:
-    - postgres
     - redis
-    - minio
   environment:
     <<: *base-environment
 
@@ -30,121 +29,26 @@ x-exec-agent-common: &exec-agent-common
     <<: *base-environment
     LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
     RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
+    JOIN_STREAM: 1
+    COPROC_STREAM: 1
   entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
-
-x-broker-environment: &broker-environment
-  RUST_LOG: ${RUST_LOG:-info,broker=debug,boundless_market=debug}
-  # RUST_BACKTRACE: 1
-  PRIVATE_KEY: ${PRIVATE_KEY}
-  RPC_URL: ${RPC_URL}
-  BOUNDLESS_MARKET_ADDRESS:
-  SET_VERIFIER_ADDRESS:
-  ORDER_STREAM_URL:
-  # TODO these env vars are temporary for handling cancellations. These should be removed when
-  # updated.
-  POSTGRES_HOST:
-  POSTGRES_DB:
-  POSTGRES_PORT:
-  POSTGRES_USER:
-  POSTGRES_PASS:
-
-x-broker-common: &broker-common
-  restart: always
-  depends_on:
-    - rest_api
-    - gpu_prove_agent0
-    - gpu_prove_agent1
-    - gpu_prove_agent2
-    - gpu_prove_agent3
-    - gpu_prove_agent4
-    - gpu_prove_agent5
-    - gpu_prove_agent6
-    - gpu_prove_agent7
-    - exec_agent0
-    - exec_agent1
-    - exec_agent2
-    - exec_agent3
-    - aux_agent
-    - snark_agent
-    - redis
-    - postgres
-  profiles: [broker]
-  build:
-    context: .
-    dockerfile: dockerfiles/broker.dockerfile
-  mem_limit: 10G
-  cpus: 10
-  stop_grace_period: 3h
-  network_mode: host
 
 services:
   redis:
     hostname: ${REDIS_HOST:-redis}
     image: ${REDIS_IMG:-redis:7.2.5-alpine3.19}
-    mem_limit: 50G
+    mem_limit: 30G
     restart: always
     ports:
-      - 6379:6379
+      - "6379:6379"
     volumes:
       - redis-data:/data
-    command: redis-server --maxmemory 48g --maxmemory-policy allkeys-lru
-
-  postgres:
-    hostname: ${POSTGRES_HOST:-postgres}
-    image: ${POSTGRES_IMG:-postgres:16.3-bullseye}
-    restart: always
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-taskdb}
-      POSTGRES_USER: ${POSTGRES_USER:-worker}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
-    expose:
-      - "${POSTGRES_PORT:-5432}"
-    ports:
-      - "${POSTGRES_PORT:-5432}:${POSTGRES_PORT:-5432}"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    command: -p ${POSTGRES_PORT:-5432}
-
-  minio:
-    hostname: ${MINIO_HOST:-minio}
-    image: ${MINIO_IMG:-minio/minio:RELEASE.2024-05-28T17-19-04Z}
-    restart: always
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - minio-data:/data
-    command: server /data --console-address ":9001"
-    environment:
-      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-admin}
-      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASS:-password}
-      - MINIO_DEFAULT_BUCKETS=${MINIO_BUCKET:-workflow}
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
+    command: redis-server --maxmemory 28g --maxmemory-policy allkeys-lru
   exec_agent0:
     <<: *exec-agent-common
 
   exec_agent1:
     <<: *exec-agent-common
-
-  exec_agent2:
-    <<: *exec-agent-common
-
-  exec_agent3:
-    <<: *exec-agent-common
-
-  aux_agent:
-    <<: *agent-common
-    mem_limit: 512M
-    cpus: 2
-    environment:
-      <<: *base-environment
-      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
-    entrypoint: /app/agent -t aux --monitor-requeue --redis-ttl ${REDIS_TTL:-57600}
 
   gpu_prove_agent0:
     <<: *agent-common
@@ -159,170 +63,51 @@ services:
             - driver: nvidia
               device_ids: ["0"]
               capabilities: [gpu]
-
-  gpu_prove_agent1:
+  join_agent:
     <<: *agent-common
-    runtime: nvidia
     mem_limit: 16G
     cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    entrypoint: /app/agent -t join --redis-ttl ${REDIS_TTL:-57600}
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ["1"]
+              device_ids: ["0"]
               capabilities: [gpu]
+  # gpu_prove_agent2:
+  #   <<: *agent-common
+  #   runtime: nvidia
+  #   mem_limit: 16G
+  #   cpus: 8
+  #   entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             device_ids: ["2"]
+  #             capabilities: [gpu]
 
-  gpu_prove_agent2:
+  # Auxiliary Agent
+  aux_agent:
     <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["2"]
-              capabilities: [gpu]
+    mem_limit: 512M
+    cpus: 2
+    environment:
+      <<: *base-environment
+      LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
+    entrypoint: /app/agent -t aux --monitor-requeue --redis-ttl ${REDIS_TTL:-57600}
 
-  gpu_prove_agent3:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["3"]
-              capabilities: [gpu]
-
-  gpu_prove_agent4:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["4"]
-              capabilities: [gpu]
-
-  gpu_prove_agent5:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["5"]
-              capabilities: [gpu]
-
-  gpu_prove_agent6:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["6"]
-              capabilities: [gpu]
-
-  gpu_prove_agent7:
-    <<: *agent-common
-    runtime: nvidia
-    mem_limit: 16G
-    cpus: 8
-    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ["7"]
-              capabilities: [gpu]
-
+  # SNARK Agent
   snark_agent:
     <<: *agent-common
     entrypoint: /app/agent -t snark --redis-ttl ${REDIS_TTL:-57600}
     environment:
       <<: *base-environment
       LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-/usr/local/cuda-12.9/compat/}
-
     ulimits:
       # Needed for stark_verify bin
-      # TODO: this number was just guess and check found
       stack: 90000000
-
-  rest_api:
-    image: risczero/risc0-bento-rest-api:2.3.1
-    restart: always
-    depends_on:
-      - postgres
-      - minio
-    mem_limit: 2G
-    cpus: 2
-    environment:
-      <<: *base-environment
-    ports:
-      - "8081:8081"
-    entrypoint: /app/rest_api --bind-addr 0.0.0.0:8081 --snark-timeout ${SNARK_TIMEOUT:-180}
-
-  broker:
-    <<: *broker-common
-    volumes:
-      - type: bind
-        source: ./broker.toml
-        target: /app/broker.toml
-      - broker-data:/db/
-    # Uncomment when using locally built set-builder and assessor guest programs
-    # - type: bind
-    #   source: ./target/riscv-guest/guest-set-builder/set-builder/riscv32im-risc0-zkvm-elf/release/set-builder.bin
-    #   target: /target/riscv-guest/guest-set-builder/set-builder/riscv32im-risc0-zkvm-elf/release/set-builder.bin
-    # - type: bind
-    #   source: ./target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
-    #   target: /target/riscv-guest/guest-assessor/assessor-guest/riscv32im-risc0-zkvm-elf/release/assessor-guest.bin
-    environment:
-      <<: *broker-environment
-      PRIVATE_KEY: ${PRIVATE_KEY}
-      RPC_URL: ${RPC_URL}
-    entrypoint: /app/broker --db-url 'sqlite:///db/broker.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
-
-# # Example second broker with different configuration
-# broker2:
-#   <<: *broker-common
-#   volumes:
-#     - type: bind
-#       source: ./broker2.toml
-#       target: /app/broker.toml
-#     - broker2-data:/db/
-#   environment:
-#     <<: *broker-environment
-#     # Note: use a different variable if you want to use different private keys in each broker
-#     PRIVATE_KEY: ${PRIVATE_KEY}
-#     RPC_URL: ${RPC_URL_2}
-#   entrypoint: /app/broker --db-url 'sqlite:///db/broker2.db' --config-file /app/broker.toml --bento-api-url http://localhost:8081
-
 volumes:
   redis-data:
-  postgres-data:
-  minio-data:
-  grafana-data:
-  broker-data:
-  # broker2-data:
