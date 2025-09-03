@@ -2,9 +2,9 @@ name: bento
 
 # Anchors:
 x-base-environment: &base-environment
-  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-125.253.92.103}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-192.168.45.93}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
   REDIS_URL: redis://${REDIS_HOST:-redis}:6379
-  S3_URL: http://${MINIO_HOST:-125.253.92.103}:9000
+  S3_URL: http://${MINIO_HOST:-192.168.45.93}:9000
   S3_BUCKET: ${MINIO_BUCKET:-workflow}
   S3_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
   S3_SECRET_KEY: ${MINIO_ROOT_PASS:-password}
@@ -23,7 +23,7 @@ x-agent-common: &agent-common
 x-exec-agent-common: &exec-agent-common
   <<: *agent-common
   mem_limit: 16G
-  cpus: 8
+  cpus: 3
   runtime: nvidia
   environment:
     <<: *base-environment
@@ -48,6 +48,15 @@ services:
     <<: *exec-agent-common
 
   exec_agent1:
+    <<: *exec-agent-common
+
+  exec_agent2:
+    <<: *exec-agent-common
+
+  exec_agent3:
+    <<: *exec-agent-common
+
+  exec_agent4:
     <<: *exec-agent-common
 
   gpu_prove_agent0:
@@ -75,21 +84,7 @@ services:
             - driver: nvidia
               device_ids: ["0"]
               capabilities: [gpu]
-  # gpu_prove_agent2:
-  #   <<: *agent-common
-  #   runtime: nvidia
-  #   mem_limit: 16G
-  #   cpus: 8
-  #   entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices:
-  #           - driver: nvidia
-  #             device_ids: ["2"]
-  #             capabilities: [gpu]
 
-  # Auxiliary Agent
   aux_agent:
     <<: *agent-common
     mem_limit: 512M
