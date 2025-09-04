@@ -19,8 +19,8 @@ RESET='\033[0m'
 
 # Constants
 SCRIPT_NAME="$(basename "$0")"
-LOG_FILE="/var/log/boundless_prover_setup.log"
-ERROR_LOG="/var/log/boundless_prover_error.log"
+LOG_FILE="/home/ubuntu/log/boundless_prover_setup.log"
+ERROR_LOG="/home/ubuntu/log/boundless_prover_error.log"
 INSTALL_DIR="$HOME/boundless"
 COMPOSE_FILE="$INSTALL_DIR/compose.yml"
 BROKER_CONFIG="$INSTALL_DIR/broker.toml"
