@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =============================================================================
-# Boundless Prover Node Setup Script
-# Description: Automated installation and configuration of Boundless prover node
+# Boundless Prover Node Setup Script - Modified Version
+# Description: Automated installation handling both system and user components
 # =============================================================================
 
 set -euo pipefail
@@ -17,11 +17,20 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
+# Determine actual user and home directory
+if [[ $EUID -eq 0 ]]; then
+    ACTUAL_USER=${SUDO_USER:-$USER}
+    ACTUAL_HOME=$(eval echo "~$ACTUAL_USER")
+else
+    ACTUAL_USER=$USER
+    ACTUAL_HOME=$HOME
+fi
+
 # Constants
 SCRIPT_NAME="$(basename "$0")"
-LOG_FILE="/$HOME/log/boundless_prover_setup.log"
-ERROR_LOG="/$HOME/log/boundless_prover_error.log"
-INSTALL_DIR="$HOME/boundless"
+LOG_FILE="$ACTUAL_HOME/log/boundless_prover_setup.log"
+ERROR_LOG="$ACTUAL_HOME/log/boundless_prover_error.log"
+INSTALL_DIR="$ACTUAL_HOME/boundless"
 COMPOSE_FILE="$INSTALL_DIR/compose.yml"
 BROKER_CONFIG="$INSTALL_DIR/broker.toml"
 
@@ -71,59 +80,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Trap function for exit logging
-cleanup_on_exit() {
-    local exit_code=$?
-    if [ $exit_code -ne 0 ]; then
-        error "Installation failed with exit code: $exit_code"
-        echo "[EXIT] Script exited with code: $exit_code at $(date)" >> "$ERROR_LOG"
-        echo "[EXIT] Last command: ${BASH_COMMAND}" >> "$ERROR_LOG"
-        echo "[EXIT] Line number: ${BASH_LINENO[0]}" >> "$ERROR_LOG"
-        echo "[EXIT] Function stack: ${FUNCNAME[@]}" >> "$ERROR_LOG"
-
-        echo -e "\n${RED}${BOLD}Installation Failed!${RESET}"
-        echo -e "${YELLOW}Check error log at: $ERROR_LOG${RESET}"
-        echo -e "${YELLOW}Check full log at: $LOG_FILE${RESET}"
-
-        case $exit_code in
-            $EXIT_DPKG_ERROR)
-                echo -e "\n${RED}DPKG Configuration Error Detected!${RESET}"
-                echo -e "${YELLOW}Please run the following command manually:${RESET}"
-                echo -e "${BOLD}dpkg --configure -a${RESET}"
-                echo -e "${YELLOW}Then re-run this installation script.${RESET}"
-                ;;
-            $EXIT_OS_CHECK_FAILED)
-                echo -e "\n${RED}Operating system check failed!${RESET}"
-                ;;
-            $EXIT_DEPENDENCY_FAILED)
-                echo -e "\n${RED}Dependency installation failed!${RESET}"
-                ;;
-            $EXIT_GPU_ERROR)
-                echo -e "\n${RED}GPU configuration error!${RESET}"
-                ;;
-            $EXIT_NETWORK_ERROR)
-                echo -e "\n${RED}Network configuration error!${RESET}"
-                ;;
-            $EXIT_USER_ABORT)
-                echo -e "\n${YELLOW}Installation aborted by user.${RESET}"
-                ;;
-            *)
-                echo -e "\n${RED}Unknown error occurred!${RESET}"
-                ;;
-        esac
-    fi
-}
-
-# Set trap
-trap cleanup_on_exit EXIT
-trap 'echo "[SIGNAL] Caught signal ${?} at line ${LINENO}" >> "$ERROR_LOG"' ERR
-
-# Network configurations
-declare -A NETWORKS
-NETWORKS["base"]="Base Mainnet|0x0b144e07a0826182b6b59788c34b32bfa86fb711|0x26759dbB201aFbA361Bec78E097Aa3942B0b4AB8|0x8C5a8b5cC272Fe2b74D18843CF9C3aCBc952a760|https://base-mainnet.beboundless.xyz"
-NETWORKS["base-sepolia"]="Base Sepolia|0x0b144e07a0826182b6b59788c34b32bfa86fb711|0x6B7ABa661041164b8dB98E30AE1454d2e9D5f14b|0x8C5a8b5cC272Fe2b74D18843CF9C3aCBc952a760|https://base-sepolia.beboundless.xyz"
-NETWORKS["eth-sepolia"]="Ethereum Sepolia|0x925d8331ddc0a1F0d96E68CF073DFE1d92b69187|0x13337C76fE2d1750246B68781ecEe164643b98Ec|0x7aAB646f23D1392d4522CFaB0b7FB5eaf6821d64|https://eth-sepolia.beboundless.xyz/"
-
 # Functions
 info() {
     printf "${CYAN}[INFO]${RESET} %s\n" "$1"
@@ -146,17 +102,28 @@ warning() {
     echo "[WARNING] $(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
 
-prompt() {
-    printf "${PURPLE}[INPUT]${RESET} %s" "$1"
+# Function to run commands as actual user
+run_as_user() {
+    if [[ $EUID -eq 0 ]]; then
+        sudo -u "$ACTUAL_USER" -H "$@"
+    else
+        "$@"
+    fi
 }
 
-# Check for dpkg errors
-check_dpkg_status() {
-    if dpkg --audit 2>&1 | grep -q "dpkg was interrupted"; then
-        error "dpkg was interrupted - manual intervention required"
-        return 1
+# Function to run commands as root (system packages)
+run_as_root() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+    else
+        if command -v sudo &> /dev/null; then
+            sudo "$@"
+        else
+            error "This script requires root privileges for system package installation"
+            error "Please install sudo or run as root"
+            exit 1
+        fi
     fi
-    return 0
 }
 
 # Check OS compatibility
@@ -182,42 +149,15 @@ check_os() {
     fi
 }
 
-# Check if command exists
-command_exists() {
-    command -v "$1" &> /dev/null
-}
-
-# Check if package is installed
-is_package_installed() {
-    dpkg -s "$1" &> /dev/null
-}
-
-# Update system
+# Update system (requires root)
 update_system() {
     info "Updating system packages..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        if ! apt update -y 2>&1; then
-            error "apt update failed"
-            if apt update 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        if ! apt upgrade -y 2>&1; then
-            error "apt upgrade failed"
-            if apt upgrade 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-    } >> "$LOG_FILE" 2>&1
+    run_as_root apt update -y
+    run_as_root apt upgrade -y
     success "System packages updated"
 }
 
-# Install basic dependencies
+# Install basic dependencies (requires root)
 install_basic_deps() {
     local packages=(
         curl iptables build-essential git wget lz4 jq make gcc nano
@@ -227,116 +167,51 @@ install_basic_deps() {
         gnupg ca-certificates lsb-release postgresql-client
     )
     info "Installing basic dependencies..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        if ! apt install -y "${packages[@]}" 2>&1; then
-            error "Failed to install basic dependencies"
-            if apt install -y "${packages[@]}" 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-    } >> "$LOG_FILE" 2>&1
+    run_as_root apt install -y "${packages[@]}"
     success "Basic dependencies installed"
 }
 
-# Install GPU drivers
+# Install GPU drivers (requires root)
 install_gpu_drivers() {
     info "Installing NVIDIA drivers version 575-open..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        # Add NVIDIA repository
-        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
-        curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-        
-        # Update package list
-        if ! apt update -y 2>&1; then
-            error "Failed to update package list for NVIDIA drivers"
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        
-        # Install specific NVIDIA driver version
-        if ! apt install -y nvidia-driver-575-open 2>&1; then
-            error "Failed to install NVIDIA driver 575-open"
-            if apt install -y nvidia-driver-575-open 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_GPU_ERROR
-        fi
-    } >> "$LOG_FILE" 2>&1
+    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    run_as_root bash -c "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
+    run_as_root bash -c "curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+    run_as_root apt update -y
+    run_as_root apt install -y nvidia-driver-575-open
     success "NVIDIA drivers 575-open installed"
 }
 
-# Install Docker
+# Install Docker (requires root)
 install_docker() {
-    if command_exists docker; then
+    if command -v docker &> /dev/null; then
         info "Docker already installed"
-        return
+    else
+        info "Installing Docker..."
+        run_as_root apt install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common
+        run_as_root bash -c "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg"
+        run_as_root bash -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null'
+        run_as_root apt update -y
+        run_as_root apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        run_as_root systemctl enable docker
+        run_as_root systemctl start docker
+        success "Docker installed"
     fi
-    info "Installing Docker..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        if ! apt install -y apt-transport-https ca-certificates curl gnupg-agent software-properties-common 2>&1; then
-            error "Failed to install Docker prerequisites"
-            if apt install -y apt-transport-https 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-        if ! apt update -y 2>&1; then
-            error "Failed to update package list for Docker"
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        if ! apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin 2>&1; then
-            error "Failed to install Docker"
-            if apt install -y docker-ce 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        systemctl enable docker
-        systemctl start docker
-        usermod -aG docker $(logname 2>/dev/null || echo "$USER")
-    } >> "$LOG_FILE" 2>&1
-    success "Docker installed"
+    # Always try to add user to docker group
+    run_as_root usermod -aG docker "$ACTUAL_USER"
+    success "User $ACTUAL_USER added to docker group"
 }
 
-# Install NVIDIA Container Toolkit
+# Install NVIDIA Container Toolkit (requires root)
 install_nvidia_toolkit() {
-    if is_package_installed "nvidia-docker2"; then
-        info "NVIDIA Container Toolkit already installed"
-        return
-    fi
     info "Installing NVIDIA Container Toolkit..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-        curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -
-        curl -s -L https://nvidia.github.io/nvidia-docker/"$distribution"/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list
-        if ! apt update -y 2>&1; then
-            error "Failed to update package list for NVIDIA toolkit"
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        if ! apt install -y nvidia-docker2 2>&1; then
-            error "Failed to install NVIDIA Docker support"
-            if apt install -y nvidia-docker2 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        mkdir -p /etc/docker
-        tee /etc/docker/daemon.json <<EOF
+    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    run_as_root bash -c "curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -"
+    run_as_root bash -c "curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list"
+    run_as_root apt update -y
+    run_as_root apt install -y nvidia-docker2
+    run_as_root mkdir -p /etc/docker
+    run_as_root tee /etc/docker/daemon.json > /dev/null <<'EOF'
 {
     "default-runtime": "nvidia",
     "runtimes": {
@@ -347,130 +222,62 @@ install_nvidia_toolkit() {
     }
 }
 EOF
-        systemctl restart docker
-    } >> "$LOG_FILE" 2>&1
+    run_as_root systemctl restart docker
     success "NVIDIA Container Toolkit installed"
 }
 
-# Install Rust
-install_rust() {
-    if command_exists rustc; then
-        info "Rust already installed"
-        return
-    fi
-    info "Installing Rust..."
-    {
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        source "$HOME/.cargo/env"
-        rustup update
-    } >> "$LOG_FILE" 2>&1
-    success "Rust installed"
-}
-
-# Install Just
-install_just() {
-    if command_exists just; then
-        info "Just already installed"
-        return
-    fi
-    info "Installing Just command runner..."
-    {
-        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
-    } >> "$LOG_FILE" 2>&1
-    success "Just installed"
-}
-
-# Install CUDA Toolkit
+# Install CUDA Toolkit (requires root)
 install_cuda() {
-    if is_package_installed "cuda-toolkit-12-9"; then
-        info "CUDA Toolkit 12.9 already installed"
-        return
-    fi
     info "Installing CUDA Toolkit 12.9..."
-    if ! check_dpkg_status; then
-        exit $EXIT_DPKG_ERROR
-    fi
-    {
-        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"'| tr -d '\.')
-        if ! wget https://developer.download.nvidia.com/compute/cuda/repos/$distribution/$(/usr/bin/uname -m)/cuda-keyring_1.1-1_all.deb 2>&1; then
-            error "Failed to download CUDA keyring"
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        if ! dpkg -i cuda-keyring_1.1-1_all.deb 2>&1; then
-            error "Failed to install CUDA keyring"
-            rm cuda-keyring_1.1-1_all.deb
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        rm cuda-keyring_1.1-1_all.deb
-        if ! apt-get update 2>&1; then
-            error "Failed to update package list for CUDA"
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        if ! apt-get install -y cuda-toolkit-12-9 2>&1; then
-            error "Failed to install CUDA Toolkit 12.9"
-            if apt-get install -y cuda-toolkit-12-9 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        fi
-        
-        # Set up CUDA environment variables
-        echo 'export PATH=/usr/local/cuda-12.9/bin:$PATH' >> ~/.bashrc
-        echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
-    } >> "$LOG_FILE" 2>&1
+    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"'| tr -d '\.')
+    cd /tmp
+    run_as_root wget "https://developer.download.nvidia.com/compute/cuda/repos/$distribution/$(uname -m)/cuda-keyring_1.1-1_all.deb"
+    run_as_root dpkg -i cuda-keyring_1.1-1_all.deb
+    run_as_root rm -f cuda-keyring_1.1-1_all.deb
+    run_as_root apt-get update
+    run_as_root apt-get install -y cuda-toolkit-12-9
     success "CUDA Toolkit 12.9 installed"
 }
 
-# Install Rust dependencies
-install_rust_deps() {
-    info "Installing Rust dependencies..."
-
-    # Source the Rust environment
-    source "$HOME/.cargo/env" || {
-        error "Failed to source $HOME/.cargo/env. Ensure Rust is installed."
-        exit $EXIT_DEPENDENCY_FAILED
-    }
-
-    # Check and install cargo if not present
-    if ! command_exists cargo; then
-        if ! check_dpkg_status; then
-            exit $EXIT_DPKG_ERROR
-        fi
-        info "Installing cargo..."
-        apt update >> "$LOG_FILE" 2>&1 || {
-            error "Failed to update package list for cargo"
-            exit $EXIT_DEPENDENCY_FAILED
-        }
-        apt install -y cargo >> "$LOG_FILE" 2>&1 || {
-            error "Failed to install cargo"
-            if apt install -y cargo 2>&1 | grep -q "dpkg was interrupted"; then
-                exit $EXIT_DPKG_ERROR
-            fi
-            exit $EXIT_DEPENDENCY_FAILED
-        }
+# Install Rust (as user)
+install_rust() {
+    if run_as_user bash -c 'command -v rustc &> /dev/null'; then
+        info "Rust already installed for user $ACTUAL_USER"
+        return
     fi
+    info "Installing Rust for user $ACTUAL_USER..."
+    run_as_user bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+    run_as_user bash -c 'source "$HOME/.cargo/env" && rustup update'
+    success "Rust installed for user $ACTUAL_USER"
+}
 
-    # Always install rzup and the RISC Zero Rust toolchain
-    info "Installing rzup..."
-    curl -L https://risczero.com/install | bash >> "$LOG_FILE" 2>&1 || {
-        error "Failed to install rzup"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
-    # Update PATH in the current shell
-    export PATH="$PATH:/root/.risc0/bin"
-    # Source bashrc to ensure environment is updated
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after rzup install"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+# Install Just (as user)
+install_just() {
+    if run_as_user bash -c 'command -v just &> /dev/null'; then
+        info "Just already installed for user $ACTUAL_USER"
+        return
+    fi
+    info "Installing Just command runner for user $ACTUAL_USER..."
+    run_as_user mkdir -p "$ACTUAL_HOME/.local/bin"
+    run_as_user bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.local/bin"'
+    # Add to PATH if not already there
+    run_as_user bash -c 'if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> ~/.bashrc; fi'
+    success "Just installed for user $ACTUAL_USER"
+}
+
+# Install Rust dependencies (as user)
+install_rust_deps() {
+    info "Installing Rust dependencies for user $ACTUAL_USER..."
+
+    # Install rzup and the RISC Zero Rust toolchain
+    info "Installing rzup for user $ACTUAL_USER..."
+    run_as_user bash -c 'curl -L https://risczero.com/install | bash'
+    
     # Install RISC Zero Rust toolchain
-    rzup install rust >> "$LOG_FILE" 2>&1 || {
-        error "Failed to install RISC Zero Rust toolchain"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin" && "$HOME/.risc0/bin/rzup" install rust'
 
     # Detect the RISC Zero toolchain
-    TOOLCHAIN=$(rustup toolchain list | grep risc0 | head -1)
+    TOOLCHAIN=$(run_as_user bash -c 'source "$HOME/.cargo/env" && rustup toolchain list | grep risc0 | head -1 | cut -d" " -f1')
     if [ -z "$TOOLCHAIN" ]; then
         error "No RISC Zero toolchain found after installation"
         exit $EXIT_DEPENDENCY_FAILED
@@ -478,91 +285,70 @@ install_rust_deps() {
     info "Using RISC Zero toolchain: $TOOLCHAIN"
 
     # Install cargo-risczero
-    if ! command_exists cargo-risczero; then
-        info "Installing cargo-risczero..."
-        cargo install cargo-risczero >> "$LOG_FILE" 2>&1 || {
-            error "Failed to install cargo-risczero"
-            exit $EXIT_DEPENDENCY_FAILED
-        }
-        rzup install cargo-risczero >> "$LOG_FILE" 2>&1 || {
-            error "Failed to install cargo-risczero via rzup"
-            exit $EXIT_DEPENDENCY_FAILED
-        }
-    fi
+    info "Installing cargo-risczero for user $ACTUAL_USER..."
+    run_as_user bash -c 'source "$HOME/.cargo/env" && cargo install cargo-risczero'
+    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin" && "$HOME/.risc0/bin/rzup" install cargo-risczero'
 
     # Install bento-client with the RISC Zero toolchain
-    info "Installing bento-client..."
-    RUSTUP_TOOLCHAIN=$TOOLCHAIN cargo install --locked --git https://github.com/risc0/risc0 bento-client --branch release-2.3 --bin bento_cli
- >> "$LOG_FILE" 2>&1 || {
-        error "Failed to install bento-client"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
-    # Persist PATH for cargo binaries
-    echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> ~/.bashrc
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after installing bento-client"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+    info "Installing bento-client for user $ACTUAL_USER..."
+    run_as_user bash -c "source \"\$HOME/.cargo/env\" && RUSTUP_TOOLCHAIN=$TOOLCHAIN cargo install --locked --git https://github.com/risc0/risc0 bento-client --branch release-2.3 --bin bento_cli"
 
     # Install boundless-cli
-    info "Installing boundless-cli..."
-    cargo install --locked boundless-cli >> "$LOG_FILE" 2>&1 || {
-        error "Failed to install boundless-cli"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
-    # Update PATH for boundless-cli
-    export PATH="$PATH:/root/.cargo/bin"
-    PS1='' source ~/.bashrc >> "$LOG_FILE" 2>&1 || {
-        error "Failed to source ~/.bashrc after installing boundless-cli"
-        exit $EXIT_DEPENDENCY_FAILED
-    }
+    info "Installing boundless-cli for user $ACTUAL_USER..."
+    run_as_user bash -c 'source "$HOME/.cargo/env" && cargo install --locked boundless-cli'
 
-    success "Rust dependencies installed"
+    # Update PATH for cargo binaries and CUDA
+    run_as_user bash -c 'if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then echo "export PATH=\"\$HOME/.cargo/bin:\$PATH\"" >> ~/.bashrc; fi'
+    run_as_user bash -c 'if [[ ":$PATH:" != *":/usr/local/cuda-12.9/bin:"* ]]; then echo "export PATH=/usr/local/cuda-12.9/bin:\$PATH" >> ~/.bashrc; echo "export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:\$LD_LIBRARY_PATH" >> ~/.bashrc; fi'
+
+    success "Rust dependencies installed for user $ACTUAL_USER"
 }
-
 
 # Main installation flow
 main() {
     echo -e "${BOLD}${CYAN}Boundless Prover Node Setup${RESET}"
     echo "========================================"
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE"
-    touch "$ERROR_LOG"
+    
+    # Create log directories as actual user
+    run_as_user mkdir -p "$(dirname "$LOG_FILE")"
+    run_as_user touch "$LOG_FILE"
+    run_as_user touch "$ERROR_LOG"
+    
     echo "[START] Installation started at $(date)" >> "$LOG_FILE"
     echo "[START] Installation started at $(date)" >> "$ERROR_LOG"
+    
+    info "Running as: $(whoami)"
+    info "Installing for user: $ACTUAL_USER"
+    info "Home directory: $ACTUAL_HOME"
     info "Logs will be saved to:"
     info "  - Full log: $LOG_FILE"
     info "  - Error log: $ERROR_LOG"
     echo
-    if [[ $EUID -eq 0 ]]; then
-        if [[ "$ALLOW_ROOT" == "true" ]]; then
-            warning "Running as root (allowed via --allow-root)"
-        else
-            warning "Running as root user"
-            read -e -p "Continue? (y/N): " response
-            if [[ ! "$response" =~ ^[yY]$ ]]; then
-                exit $EXIT_USER_ABORT
-            fi
-        fi
-    else
-        warning "This script requires root privileges or a user with appropriate permissions"
-        info "Please ensure you have the necessary permissions to install packages and modify system settings"
+
+    if [[ $EUID -ne 0 ]]; then
+        warning "Some operations require root privileges and will use sudo"
+        info "Make sure you have sudo access"
     fi
+
     check_os
     update_system
-    info "Installing all dependencies..."
+    info "Installing system dependencies..."
     install_basic_deps
     install_gpu_drivers
     install_docker
     install_nvidia_toolkit
+    install_cuda
+    
+    info "Installing user dependencies..."
     install_rust
     install_just
-    install_cuda
     install_rust_deps
+    
     echo -e "\n${GREEN}${BOLD}Installation Complete!${RESET}"
+    echo -e "${YELLOW}Please run 'source ~/.bashrc' or restart your terminal to update PATH${RESET}"
+    echo -e "${YELLOW}You may need to log out and back in for Docker group membership to take effect${RESET}"
     echo "[SUCCESS] Installation completed successfully at $(date)" >> "$LOG_FILE"
-
 }
 
 # Run main
-main
+main "$@"
