@@ -7,6 +7,14 @@
 
 set -euo pipefail
 
+# Prevent interactive prompts during package installation
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export NEEDRESTART_SUSPEND=1
+export UCF_FORCE_CONFOLD=1
+export DEBIAN_PRIORITY=critical
+export APT_LISTCHANGES_FRONTEND=none
+
 # Color variables
 CYAN='\033[0;36m'
 LIGHTBLUE='\033[1;34m'
@@ -126,6 +134,57 @@ run_as_root() {
     fi
 }
 
+# Function to clean up broken NVIDIA repositories
+cleanup_nvidia_repos() {
+    info "Cleaning up any existing NVIDIA repository configurations..."
+    
+    # Remove all existing NVIDIA-related keys and repositories
+    run_as_root rm -f /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    run_as_root rm -f /usr/share/keyrings/nvidia-docker-keyring.gpg
+    run_as_root rm -f /etc/apt/sources.list.d/nvidia-container-toolkit.list
+    run_as_root rm -f /etc/apt/sources.list.d/nvidia-docker.list
+    run_as_root rm -f /etc/apt/sources.list.d/libnvidia-container.list
+    
+    # Remove any cached apt lists for nvidia repositories
+    run_as_root rm -f /var/lib/apt/lists/*nvidia*
+    
+    # Remove old apt keys (if any)
+    run_as_root apt-key del DDCAE044F796ECB0 2>/dev/null || true
+    
+    success "NVIDIA repository cleanup completed"
+}
+
+# Function to configure APT for non-interactive installation
+configure_apt() {
+    info "Configuring APT for non-interactive installation..."
+    run_as_root tee /etc/apt/apt.conf.d/50unattended-install > /dev/null <<'EOF'
+// Prevent interactive prompts during package installation
+Dpkg::Options {
+   "--force-confdef";
+   "--force-confold";
+}
+
+// Prevent needrestart from prompting
+DPkg::Pre-Install-Pkgs {
+   "test -x /usr/bin/needrestart && needrestart -r a || true";
+}
+EOF
+    success "APT configured for non-interactive installation"
+}
+
+# Function to configure needrestart to prevent interactive prompts
+configure_needrestart() {
+    info "Configuring needrestart to prevent interactive prompts..."
+    run_as_root tee /etc/needrestart/conf.d/50-local.conf > /dev/null <<'EOF'
+# Restart mode: (l)ist only, (i)nteractive or (a)utomatically
+$nrconf{restart} = 'a';
+
+# Disable hints on pending kernel upgrades
+$nrconf{kernelhints} = 0;
+EOF
+    success "needrestart configured"
+}
+
 # Check OS compatibility
 check_os() {
     info "Checking operating system compatibility..."
@@ -152,7 +211,17 @@ check_os() {
 # Update system (requires root)
 update_system() {
     info "Updating system packages..."
-    run_as_root apt update -y
+    # Set environment variables to prevent interactive prompts
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    
+    # Update with error handling for broken repositories
+    run_as_root apt update -y --allow-unauthenticated 2>/dev/null || {
+        warning "Some repositories had issues, cleaning up and retrying..."
+        run_as_root apt update -y
+    }
+    
     run_as_root apt upgrade -y
     success "System packages updated"
 }
@@ -167,6 +236,11 @@ install_basic_deps() {
         gnupg ca-certificates lsb-release postgresql-client
     )
     info "Installing basic dependencies..."
+    # Set environment variables to prevent interactive prompts
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    
     run_as_root apt install -y "${packages[@]}"
     success "Basic dependencies installed"
 }
@@ -174,12 +248,26 @@ install_basic_deps() {
 # Install GPU drivers (requires root)
 install_gpu_drivers() {
     info "Installing NVIDIA drivers version 575-open..."
-    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-    run_as_root bash -c "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"
-    run_as_root bash -c "curl -s -L https://nvidia.github.io/libnvidia-container/$distribution/libnvidia-container.list | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list"
+    
+    # Set environment variables to prevent interactive prompts
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    
+    # Install NVIDIA drivers directly from Ubuntu repositories (more reliable)
     run_as_root apt update -y
-    run_as_root apt install -y nvidia-driver-575-open
-    success "NVIDIA drivers 575-open installed"
+    run_as_root apt install -y ubuntu-drivers-common
+    
+    # Install the specific NVIDIA driver
+    if ! run_as_root apt install -y nvidia-driver-575-open nvidia-dkms-575-open; then
+        warning "nvidia-driver-575-open not available, trying nvidia-driver-575..."
+        if ! run_as_root apt install -y nvidia-driver-575; then
+            warning "nvidia-driver-575 not available, installing recommended driver..."
+            run_as_root ubuntu-drivers autoinstall
+        fi
+    fi
+    
+    success "NVIDIA drivers installed"
 }
 
 # Install Docker (requires root)
@@ -206,14 +294,54 @@ install_docker() {
 install_nvidia_toolkit() {
     info "Installing NVIDIA Container Toolkit..."
     
-    # The repository should already be set up by install_gpu_drivers function
-    # Just install the nvidia-container-toolkit package
+    # Set environment variables to prevent interactive prompts
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    
+    # Get distribution info
+    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    version=$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    
+    info "Setting up NVIDIA Container Toolkit repository for $distribution $version..."
+    
+    # Download and add the GPG key with retry logic
+    local retry_count=0
+    local max_retries=3
+    
+    while [ $retry_count -lt $max_retries ]; do
+        if run_as_root bash -c "curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg"; then
+            break
+        else
+            retry_count=$((retry_count + 1))
+            warning "Failed to download NVIDIA GPG key, retry $retry_count/$max_retries..."
+            sleep 2
+        fi
+    done
+    
+    if [ $retry_count -eq $max_retries ]; then
+        error "Failed to download NVIDIA GPG key after $max_retries attempts"
+        return 1
+    fi
+    
+    # Add the repository
+    run_as_root bash -c "curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/libnvidia-container.list | sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null"
+    
+    # Update package list
     run_as_root apt update -y
+    
+    # Install NVIDIA Container Toolkit
     run_as_root apt install -y nvidia-container-toolkit
     
     # Configure Docker to use nvidia runtime
     run_as_root mkdir -p /etc/docker
-    run_as_root tee /etc/docker/daemon.json > /dev/null <<'EOF'
+    
+    # Configure the container runtime
+    run_as_root nvidia-ctk runtime configure --runtime=docker
+    
+    # Ensure Docker daemon configuration
+    if [ ! -f /etc/docker/daemon.json ]; then
+        run_as_root tee /etc/docker/daemon.json > /dev/null <<'EOF'
 {
     "default-runtime": "nvidia",
     "runtimes": {
@@ -224,12 +352,12 @@ install_nvidia_toolkit() {
     }
 }
 EOF
+    fi
     
-    # Configure the container runtime
-    run_as_root nvidia-ctk runtime configure --runtime=docker
-    
+    # Restart Docker
     run_as_root systemctl restart docker
-    success "NVIDIA Container Toolkit installed"
+    
+    success "NVIDIA Container Toolkit installed and configured"
 }
 
 # Install CUDA Toolkit (requires root)
@@ -337,6 +465,9 @@ main() {
     fi
 
     check_os
+    configure_apt
+    configure_needrestart
+    cleanup_nvidia_repos
     update_system
     info "Installing system dependencies..."
     install_basic_deps
