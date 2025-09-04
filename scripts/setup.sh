@@ -205,11 +205,13 @@ install_docker() {
 # Install NVIDIA Container Toolkit (requires root)
 install_nvidia_toolkit() {
     info "Installing NVIDIA Container Toolkit..."
-    distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-    run_as_root bash -c "curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -"
-    run_as_root bash -c "curl -s -L https://nvidia.github.io/nvidia-docker/$distribution/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list"
+    
+    # The repository should already be set up by install_gpu_drivers function
+    # Just install the nvidia-container-toolkit package
     run_as_root apt update -y
-    run_as_root apt install -y nvidia-docker2
+    run_as_root apt install -y nvidia-container-toolkit
+    
+    # Configure Docker to use nvidia runtime
     run_as_root mkdir -p /etc/docker
     run_as_root tee /etc/docker/daemon.json > /dev/null <<'EOF'
 {
@@ -222,6 +224,10 @@ install_nvidia_toolkit() {
     }
 }
 EOF
+    
+    # Configure the container runtime
+    run_as_root nvidia-ctk runtime configure --runtime=docker
+    
     run_as_root systemctl restart docker
     success "NVIDIA Container Toolkit installed"
 }
