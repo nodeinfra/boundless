@@ -299,6 +299,43 @@ install_nvidia_toolkit() {
     export NEEDRESTART_MODE=a
     export NEEDRESTART_SUSPEND=1
     
+    # Fix any broken packages first
+    run_as_root apt --fix-broken install -y || true
+    
+    # Check if nvidia-container-toolkit is already installed
+    if run_as_root apt list --installed | grep -q nvidia-container-toolkit; then
+        info "NVIDIA Container Toolkit already installed, skipping repository setup"
+        
+        # Just configure Docker
+        run_as_root mkdir -p /etc/docker
+        
+        # Try to run nvidia-ctk if available
+        if command -v nvidia-ctk &> /dev/null; then
+            run_as_root nvidia-ctk runtime configure --runtime=docker || true
+        fi
+        
+        # Ensure Docker daemon configuration
+        if [ ! -f /etc/docker/daemon.json ]; then
+            run_as_root tee /etc/docker/daemon.json > /dev/null <<'EOF'
+{
+    "default-runtime": "nvidia",
+    "runtimes": {
+        "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+        }
+    }
+}
+EOF
+        fi
+        
+        # Restart Docker
+        run_as_root systemctl restart docker || true
+        
+        success "NVIDIA Container Toolkit configured"
+        return
+    fi
+    
     # Get distribution info
     distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
     version=$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
@@ -320,8 +357,8 @@ install_nvidia_toolkit() {
     done
     
     if [ $retry_count -eq $max_retries ]; then
-        error "Failed to download NVIDIA GPG key after $max_retries attempts"
-        return 1
+        warning "Failed to download NVIDIA GPG key, trying without container toolkit..."
+        return
     fi
     
     # Add the repository
@@ -330,14 +367,19 @@ install_nvidia_toolkit() {
     # Update package list
     run_as_root apt update -y
     
-    # Install NVIDIA Container Toolkit
-    run_as_root apt install -y nvidia-container-toolkit
+    # Install NVIDIA Container Toolkit with error handling
+    if ! run_as_root apt install -y nvidia-container-toolkit; then
+        warning "Failed to install nvidia-container-toolkit, trying alternative approach..."
+        run_as_root apt install -y libnvidia-container1 libnvidia-container-tools || true
+    fi
     
     # Configure Docker to use nvidia runtime
     run_as_root mkdir -p /etc/docker
     
-    # Configure the container runtime
-    run_as_root nvidia-ctk runtime configure --runtime=docker
+    # Configure the container runtime if nvidia-ctk is available
+    if command -v nvidia-ctk &> /dev/null; then
+        run_as_root nvidia-ctk runtime configure --runtime=docker || true
+    fi
     
     # Ensure Docker daemon configuration
     if [ ! -f /etc/docker/daemon.json ]; then
@@ -355,9 +397,9 @@ EOF
     fi
     
     # Restart Docker
-    run_as_root systemctl restart docker
+    run_as_root systemctl restart docker || true
     
-    success "NVIDIA Container Toolkit installed and configured"
+    success "NVIDIA Container Toolkit installation completed"
 }
 
 # Install CUDA Toolkit (requires root)
@@ -387,12 +429,17 @@ install_rust() {
 
 # Install Just (as user)
 install_just() {
-    if run_as_user bash -c 'command -v just &> /dev/null'; then
+    # Check if just is available in PATH or in .local/bin
+    if run_as_user bash -c 'command -v just &> /dev/null' || run_as_user bash -c 'test -f "$HOME/.local/bin/just"'; then
         info "Just already installed for user $ACTUAL_USER"
         return
     fi
     info "Installing Just command runner for user $ACTUAL_USER..."
     run_as_user mkdir -p "$ACTUAL_HOME/.local/bin"
+    
+    # Remove existing just binary if it exists (safety check)
+    run_as_user rm -f "$ACTUAL_HOME/.local/bin/just"
+    
     run_as_user bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to "$HOME/.local/bin"'
     # Add to PATH if not already there
     run_as_user bash -c 'if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> ~/.bashrc; fi'
@@ -403,36 +450,47 @@ install_just() {
 install_rust_deps() {
     info "Installing Rust dependencies for user $ACTUAL_USER..."
 
-    # Install rzup and the RISC Zero Rust toolchain
-    info "Installing rzup for user $ACTUAL_USER..."
-    run_as_user bash -c 'curl -L https://risczero.com/install | bash'
+    # Ensure Rust environment is properly sourced
+    run_as_user bash -c 'source "$HOME/.cargo/env" 2>/dev/null || true'
     
-    # Install RISC Zero Rust toolchain
-    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin" && "$HOME/.risc0/bin/rzup" install rust'
+    # Verify Rust installation
+    if ! run_as_user bash -c 'source "$HOME/.cargo/env" && command -v rustc &> /dev/null'; then
+        warning "Rust not properly configured, reinstalling..."
+        run_as_user bash -c 'curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y'
+    fi
+
+    # Install rzup and the RISC Zero Rust toolchain with proper environment
+    info "Installing rzup for user $ACTUAL_USER..."
+    run_as_user bash -c 'export PATH="$HOME/.cargo/bin:$PATH" && source "$HOME/.cargo/env" && curl -L https://risczero.com/install | bash'
+    
+    # Install RISC Zero Rust toolchain with full environment
+    info "Installing RISC Zero Rust toolchain..."
+    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin:$HOME/.cargo/bin" && source "$HOME/.cargo/env" 2>/dev/null || true && "$HOME/.risc0/bin/rzup" install rust'
 
     # Detect the RISC Zero toolchain
-    TOOLCHAIN=$(run_as_user bash -c 'source "$HOME/.cargo/env" && rustup toolchain list | grep risc0 | head -1 | cut -d" " -f1')
+    TOOLCHAIN=$(run_as_user bash -c 'export PATH="$HOME/.cargo/bin:$PATH" && source "$HOME/.cargo/env" && rustup toolchain list | grep risc0 | head -1 | cut -d" " -f1')
     if [ -z "$TOOLCHAIN" ]; then
         error "No RISC Zero toolchain found after installation"
         exit $EXIT_DEPENDENCY_FAILED
     fi
     info "Using RISC Zero toolchain: $TOOLCHAIN"
 
-    # Install cargo-risczero
+    # Install cargo-risczero with proper environment
     info "Installing cargo-risczero for user $ACTUAL_USER..."
-    run_as_user bash -c 'source "$HOME/.cargo/env" && cargo install cargo-risczero'
-    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin" && "$HOME/.risc0/bin/rzup" install cargo-risczero'
+    run_as_user bash -c 'export PATH="$HOME/.cargo/bin:$PATH" && source "$HOME/.cargo/env" && cargo install cargo-risczero'
+    run_as_user bash -c 'export PATH="$PATH:$HOME/.risc0/bin:$HOME/.cargo/bin" && source "$HOME/.cargo/env" 2>/dev/null || true && "$HOME/.risc0/bin/rzup" install cargo-risczero'
 
-    # Install bento-client with the RISC Zero toolchain
+    # Install bento-client with the RISC Zero toolchain and proper environment
     info "Installing bento-client for user $ACTUAL_USER..."
-    run_as_user bash -c "source \"\$HOME/.cargo/env\" && RUSTUP_TOOLCHAIN=$TOOLCHAIN cargo install --locked --git https://github.com/risc0/risc0 bento-client --branch release-2.3 --bin bento_cli"
+    run_as_user bash -c "export PATH=\"\$HOME/.cargo/bin:\$PATH\" && source \"\$HOME/.cargo/env\" && RUSTUP_TOOLCHAIN=$TOOLCHAIN cargo install --locked --git https://github.com/risc0/risc0 bento-client --branch release-2.3 --bin bento_cli"
 
-    # Install boundless-cli
+    # Install boundless-cli with proper environment
     info "Installing boundless-cli for user $ACTUAL_USER..."
-    run_as_user bash -c 'source "$HOME/.cargo/env" && cargo install --locked boundless-cli'
+    run_as_user bash -c 'export PATH="$HOME/.cargo/bin:$PATH" && source "$HOME/.cargo/env" && cargo install --locked boundless-cli'
 
     # Update PATH for cargo binaries and CUDA
     run_as_user bash -c 'if [[ ":$PATH:" != *":$HOME/.cargo/bin:"* ]]; then echo "export PATH=\"\$HOME/.cargo/bin:\$PATH\"" >> ~/.bashrc; fi'
+    run_as_user bash -c 'if [[ ":$PATH:" != *":$HOME/.risc0/bin:"* ]]; then echo "export PATH=\"\$HOME/.risc0/bin:\$PATH\"" >> ~/.bashrc; fi'
     run_as_user bash -c 'if [[ ":$PATH:" != *":/usr/local/cuda-12.9/bin:"* ]]; then echo "export PATH=/usr/local/cuda-12.9/bin:\$PATH" >> ~/.bashrc; echo "export LD_LIBRARY_PATH=/usr/local/cuda-12.9/lib64:\$LD_LIBRARY_PATH" >> ~/.bashrc; fi'
 
     success "Rust dependencies installed for user $ACTUAL_USER"

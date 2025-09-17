@@ -288,382 +288,74 @@ where
             }
         }
     }
-
-    async fn price_order(
-        &self,
-        order: &mut OrderRequest,
-    ) -> Result<OrderPricingOutcome, OrderPickerErr> {
+    async fn price_order(&self, order: &mut OrderRequest) -> Result<OrderPricingOutcome, OrderPickerErr> {
         let order_id = order.id();
-        tracing::debug!("Pricing order {order_id}");
-
         let now = now_timestamp();
-
-        // If order_expiration > lock_expiration the period in-between is when order can be filled
-        // by anyone without staking to partially claim the slashed stake
-        let lock_expired = order.fulfillment_type == FulfillmentType::FulfillAfterLockExpire;
-
-        let expiration = order.expiry();
-        let lockin_stake =
-            if lock_expired { U256::ZERO } else { U256::from(order.request.offer.lockStake) };
-
-        if expiration <= now {
-            tracing::info!("Removing order {order_id} because it has expired");
-            return Ok(Skip);
-        };
-
-        let (min_deadline, allowed_addresses_opt, denied_addresses_opt) = {
-            let config = self.config.lock_all().context("Failed to read config")?;
-            (
-                config.market.min_deadline,
-                config.market.allow_client_addresses.clone(),
-                config.market.deny_requestor_addresses.clone(),
-            )
-        };
-
-        // Does the order expire within the min deadline
-        let seconds_left = expiration.saturating_sub(now);
-        if seconds_left <= min_deadline {
-            tracing::info!("Removing order {order_id} because it expires within min_deadline: {seconds_left}, min_deadline: {min_deadline}");
+        
+        // 만료 체크
+        if order.expiry() <= now {
+            tracing::debug!("Skipping order {} - expired", order_id);
             return Ok(Skip);
         }
-
-        // Initial sanity checks:
-        if let Some(allow_addresses) = allowed_addresses_opt {
-            let client_addr = order.request.client_address();
-            if !allow_addresses.contains(&client_addr) {
-                tracing::info!("Removing order {order_id} from {client_addr} because it is not in allowed addrs");
-                return Ok(Skip);
-            }
-        }
-
-        if let Some(deny_addresses) = denied_addresses_opt {
-            let client_addr = order.request.client_address();
-            if deny_addresses.contains(&client_addr) {
-                tracing::info!(
-                    "Removing order {order_id} from {client_addr} because it is in denied addrs"
-                );
-                return Ok(Skip);
-            }
-        }
-
-        if !self.supported_selectors.is_supported(order.request.requirements.selector) {
-            tracing::info!(
-                "Removing order {order_id} because it has an unsupported selector requirement. Requested: {:x}. Supported: {:?}",
-                order.request.requirements.selector,
-                self.supported_selectors
-                    .selectors
-                    .iter()
-                    .map(|(k, v)| format!("{k:x} ({v:?})"))
-                    .collect::<Vec<_>>()
-            );
-
+        
+        // FulfillAfterLockExpire 타입은 아예 처리하지 않음
+        if order.fulfillment_type == FulfillmentType::FulfillAfterLockExpire {
+            tracing::info!("Skipping order {} - FulfillAfterLockExpire orders not supported in speed mode", order_id);
             return Ok(Skip);
+        }
+        
+        // Stake 및 config 체크 (기존 코드 그대로)
+        let lock_expired = false;
+        let lockin_stake = if lock_expired {
+            U256::ZERO
+        } else {
+            U256::from(order.request.offer.lockStake)
         };
-
-        // Check if the stake is sane and if we can afford it
-        // For lock expired orders, we don't check the max stake because we can't lock those orders.
-        let max_stake = {
+        
+        let max_stake: U256 = {
             let config = self.config.lock_all().context("Failed to read config")?;
             parse_units(&config.market.max_stake, self.stake_token_decimals)
                 .context("Failed to parse max_stake")?
                 .into()
         };
-
+        
         if !lock_expired && lockin_stake > max_stake {
             tracing::info!("Removing high stake order {order_id}, lock stake: {lockin_stake}, max stake: {max_stake}");
             return Ok(Skip);
         }
-
-        // Short circuit if the order has been locked.
-        if order.fulfillment_type == FulfillmentType::LockAndFulfill
-            && self
-                .db
-                .is_request_locked(U256::from(order.request.id))
-                .await
-                .context("Failed to check if request is locked before pricing")?
-        {
-            tracing::debug!("Order {order_id} is already locked, skipping");
+        
+        let request_id = U256::from(order.request.id);
+        
+        // 체인에서 직접 상태 확인
+        let is_locked = self.market.is_locked(request_id).await
+            .map_err(|e| OrderPickerErr::RpcErr(Arc::new(e.into())))?;
+        let is_fulfilled = self.market.is_fulfilled(request_id).await
+            .map_err(|e| OrderPickerErr::RpcErr(Arc::new(e.into())))?;
+    
+        if is_locked {
+            tracing::info!("Skipping order {} - already locked by another prover (chain check)", order_id);
             return Ok(Skip);
         }
-
-        if order.fulfillment_type == FulfillmentType::FulfillAfterLockExpire
-            && self
-                .db
-                .is_request_fulfilled(U256::from(order.request.id))
-                .await
-                .context("Failed to check if request is fulfilled before pricing")?
-        {
-            tracing::debug!("Order {order_id} is already fulfilled, skipping");
+    
+        if is_fulfilled {
+            tracing::info!("Skipping order {} - already fulfilled (chain check)", order_id);
             return Ok(Skip);
         }
-
-        // Check that we have both enough staking tokens to stake, and enough gas tokens to lock and fulfil
-        // NOTE: We use the current gas price and a rough heuristic on gas costs. Its possible that
-        // gas prices may go up (or down) by the time its time to fulfill. This does not aim to be
-        // a tight estimate, although improving this estimate will allow for a more profit.
-        let gas_price =
-            self.chain_monitor.current_gas_price().await.context("Failed to get gas price")?;
-        let order_gas = if lock_expired {
-            // No need to include lock gas if its a lock expired order
-            U256::from(
-                utils::estimate_gas_to_fulfill(
-                    &self.config,
-                    &self.supported_selectors,
-                    &order.request,
-                )
-                .await?,
-            )
-        } else {
-            U256::from(
-                utils::estimate_gas_to_lock(&self.config, order).await?
-                    + utils::estimate_gas_to_fulfill(
-                        &self.config,
-                        &self.supported_selectors,
-                        &order.request,
-                    )
-                    .await?,
-            )
-        };
-        let order_gas_cost = U256::from(gas_price) * order_gas;
-        let available_gas = self.available_gas_balance().await?;
-        let available_stake = self.available_stake_balance().await?;
-        tracing::debug!(
-            "Estimated {order_gas} gas to {} order {order_id}; {} ether @ {} gwei",
-            if lock_expired { "fulfill" } else { "lock and fulfill" },
-            format_ether(order_gas_cost),
-            format_units(gas_price, "gwei").unwrap()
-        );
-
-        if order_gas_cost > order.request.offer.maxPrice && !lock_expired {
-            // Cannot check the gas cost for lock expired orders where the reward is a fraction of the stake
-            // TODO: This can be added once we have a price feed for the stake token in gas tokens
-            tracing::info!(
-                "Estimated gas cost to lock and fulfill order {order_id}: {} exceeds max price; max price {}",
-                format_ether(order_gas_cost),
-                format_ether(order.request.offer.maxPrice)
-            );
-            return Ok(Skip);
-        }
-
-        if order_gas_cost > available_gas {
-            tracing::warn!("Estimated there will be insufficient gas for order {order_id} after locking and fulfilling pending orders; available_gas {} ether", format_ether(available_gas));
-            return Ok(Skip);
-        }
-
-        if !lock_expired && lockin_stake > available_stake {
-            tracing::warn!(
-                "Insufficient available stake to lock order {order_id}. Requires {lockin_stake}, has {available_stake}"
-            );
-            return Ok(Skip);
-        }
-
-        // Calculate exec limit (handles priority requestors and config internally)
-        let (exec_limit_cycles, prove_limit) = self.calculate_exec_limits(order, order_gas_cost)?;
-
-        if prove_limit < 2 {
-            // Exec limit is based on user cycles, and 2 is the minimum number of user cycles for a
-            // provable execution.
-            // TODO when/if total cycle limit is allowed in future, update this to be total cycle min
-            tracing::info!("Removing order {order_id} because its exec limit is too low");
-
-            return Ok(Skip);
-        }
-
-        tracing::debug!(
-            "Starting preflight execution of {order_id} with limit of {} cycles (~{} mcycles)",
-            exec_limit_cycles,
-            exec_limit_cycles / 1_000_000
-        );
-
-        // Create cache key based on input type
-        let image_id = Digest::from(order.request.requirements.imageId.0);
-        let cache_key = match order.request.input.inputType {
-            RequestInputType::Url => {
-                let input_url = std::str::from_utf8(&order.request.input.data)
-                    .context("input url is not utf8")
-                    .map_err(|e| OrderPickerErr::FetchInputErr(Arc::new(e)))?
-                    .to_string();
-                PreflightCacheKey { image_id, input: InputCacheKey::Url(input_url) }
-            }
-            RequestInputType::Inline => {
-                // For inline inputs, use SHA256 hash of the data
-                let mut hasher = Sha256::new();
-                Sha2Digest::update(&mut hasher, &order.request.input.data);
-                let input_hash: [u8; 32] = hasher.finalize().into();
-                PreflightCacheKey { image_id, input: InputCacheKey::Hash(input_hash) }
-            }
-            RequestInputType::__Invalid => {
-                return Err(OrderPickerErr::UnexpectedErr(Arc::new(anyhow::anyhow!(
-                    "Unknown input type: {:?}",
-                    order.request.input.inputType
-                ))));
-            }
-        };
-
-        // Loop while the cached result is skipped and has a lower exec limit than the current order.
-        let preflight_result = loop {
-            let prover = self.prover.clone();
-            let config = self.config.clone();
-            let request = order.request.clone();
-            let order_id_clone = order_id.clone();
-            let cache_key_clone = cache_key.clone();
-
-            let cache_cloned = self.preflight_cache.clone();
-            let result = tokio::task::spawn(async move {
-
-                // Multiple concurrent calls of this coalesce into a single execution. This is done
-                // to prevent multiple preflight jobs starting for the same program/input.
-                // https://docs.rs/moka/latest/moka/sync/struct.Cache.html#concurrent-calls-on-the-same-key-2
-                cache_cloned
-                    .try_get_with(cache_key_clone, async move {
-                        tracing::trace!(
-                            "Starting preflight of {order_id_clone} with exec limit {exec_limit_cycles} mcycles",
-                        );
-
-                        // Upload image and input only if not cached
-                        let image_id = upload_image_uri(&prover, &request, &config)
-                            .await
-                            .map_err(|e| OrderPickerErr::FetchImageErr(Arc::new(e)))?;
-
-                        let input_id = upload_input_uri(&prover, &request, &config)
-                            .await
-                            .map_err(|e| OrderPickerErr::FetchInputErr(Arc::new(e)))?;
-
-                        // TODO add a future timeout here to put a upper bound on how long to preflight for
-                        match prover
-                            .preflight(
-                                &image_id,
-                                &input_id,
-                                vec![],
-                                Some(exec_limit_cycles),
-                                &order_id_clone,
-                            )
-                            .await
-                        {
-                            Ok(res) => {
-                                tracing::debug!(
-                                    "Preflight execution of {order_id_clone} with session id {} and {} mcycles completed in {} seconds",
-                                    res.id,
-                                    res.stats.total_cycles / 1_000_000,
-                                    res.elapsed_time
-                                );
-                                Ok(PreflightCacheValue::Success {
-                                    exec_session_id: res.id,
-                                    cycle_count: res.stats.total_cycles,
-                                    image_id,
-                                    input_id,
-                                })
-                            }
-                            Err(err) => match err {
-                                ProverError::ProvingFailed(ref err_msg) => {
-                                    if err_msg.contains("Session limit exceeded") {
-                                        tracing::debug!(
-                                            "Skipping order {order_id_clone} due to session limit exceeded: {}",
-                                            err_msg
-                                        );
-                                        Ok(PreflightCacheValue::Skip {
-                                            cached_limit: exec_limit_cycles,
-                                        })
-                                    } else if err_msg.contains("Guest panicked") || err_msg.contains("GuestPanic") {
-                                        // Error message from bento and bonsai respectively for guest failures
-                                        tracing::debug!("Skipping order {order_id_clone} due to guest panic (invalid request): {}", err_msg);
-                                        Ok(PreflightCacheValue::Skip {
-                                            // Use max cached limit, to avoid re-running preflight
-                                            // for an invalid request.
-                                            cached_limit: u64::MAX,
-                                        })
-                                    } else {
-                                        Err(OrderPickerErr::UnexpectedErr(Arc::new(err.into())))
-                                    }
-                                }
-                                _ => Err(OrderPickerErr::UnexpectedErr(Arc::new(err.into()))),
-                            },
-                        }
-                    })
-                    .await
-            })
-            .await
-            .map_err(|e| OrderPickerErr::UnexpectedErr(Arc::new(e.into())))?;
-
-            let cached_value = match result {
-                Ok(value) => value,
-                Err(e) => break Err((*e).clone()),
-            };
-
-            if let PreflightCacheValue::Skip { cached_limit } = cached_value {
-                if cached_limit < exec_limit_cycles {
-                    tracing::debug!(
-                        "Cached result has insufficient limit for order {order_id} (cached: {}, required: {}), re-running preflight",
-                        cached_limit, exec_limit_cycles
-                    );
-                    self.preflight_cache.invalidate(&cache_key).await;
-                    continue;
-                }
-            }
-
-            break Ok(cached_value);
-        };
-
-        // Handle the preflight result
-        let (exec_session_id, cycle_count) = match preflight_result? {
-            PreflightCacheValue::Success { exec_session_id, cycle_count, image_id, input_id } => {
-                tracing::debug!(
-                    "Using preflight result for {order_id}: session id {} with {} mcycles",
-                    exec_session_id,
-                    cycle_count / 1_000_000
-                );
-
-                // Update order with the uploaded IDs
-                order.image_id = Some(image_id.clone());
-                order.input_id = Some(input_id.clone());
-
-                (exec_session_id, cycle_count)
-            }
-            PreflightCacheValue::Skip { .. } => {
-                return Ok(Skip);
-            }
-        };
-
-        let proof_res = ProofResult {
-            id: exec_session_id,
-            stats: ExecutorResp { total_cycles: cycle_count, ..Default::default() },
+    
+        tracing::info!("🎯 Processing LockAndFulfill order: {}", order_id);
+        
+        // 더미 데이터로 빠른 처리
+        let dummy_proof_res = ProofResult {
+            id: "speed_mode".to_string(),
+            stats: ExecutorResp { total_cycles: 1_000_000, ..Default::default() },
             elapsed_time: 0.0,
         };
-
-        // If a max_mcycle_limit is configured check if the order is over that limit
-        let proof_cycles = proof_res.stats.total_cycles;
-        if proof_cycles > prove_limit {
-            tracing::info!("Order {order_id} with {proof_cycles} cycles above prove limit from capacity ({prove_limit})");
-            return Ok(Skip);
-        }
-
-        let journal = self
-            .prover
-            .get_preflight_journal(&proof_res.id)
-            .await
-            .context("Failed to fetch preflight journal")?
-            .context("Failed to find preflight journal")?;
-
-        // ensure the journal is a size we are willing to submit on-chain
-        let max_journal_bytes =
-            self.config.lock_all().context("Failed to read config")?.market.max_journal_bytes;
-        if journal.len() > max_journal_bytes {
-            tracing::info!(
-                "Order {order_id} journal larger than set limit ({} > {}), skipping",
-                journal.len(),
-                max_journal_bytes
-            );
-            return Ok(Skip);
-        }
-
-        // Validate the predicates:
-        if !order.request.requirements.predicate.eval(journal.clone()) {
-            tracing::info!("Order {order_id} predicate check failed, skipping");
-            return Ok(Skip);
-        }
-
-        self.evaluate_order(order, &proof_res, order_gas_cost, lock_expired).await
+        
+        let order_gas_cost = U256::ZERO;
+        
+        self.evaluate_order(order, &dummy_proof_res, order_gas_cost, lock_expired).await
     }
+
 
     async fn evaluate_order(
         &self,
@@ -673,7 +365,11 @@ where
         lock_expired: bool,
     ) -> Result<OrderPricingOutcome, OrderPickerErr> {
         if lock_expired {
-            return self.evaluate_lock_expired_order(order, proof_res).await;
+            tracing::info!(
+                "Skipping lock expired order {} - lock expired orders are not processed", 
+                order.id()
+            );
+            return Ok(Skip);
         } else {
             self.evaluate_lockable_order(order, proof_res, order_gas_cost).await
         }
@@ -686,57 +382,13 @@ where
         proof_res: &ProofResult,
         order_gas_cost: U256,
     ) -> Result<OrderPricingOutcome, OrderPickerErr> {
-        let config_min_mcycle_price = {
-            let config = self.config.lock_all().context("Failed to read config")?;
-            parse_ether(&config.market.mcycle_price).context("Failed to parse mcycle_price")?
-        };
-
-        let order_id = order.id();
-        let one_mill = U256::from(1_000_000);
-
-        let mcycle_price_min = U256::from(order.request.offer.minPrice)
-            .saturating_sub(order_gas_cost)
-            .saturating_mul(one_mill)
-            / U256::from(proof_res.stats.total_cycles);
-        let mcycle_price_max = U256::from(order.request.offer.maxPrice)
-            .saturating_sub(order_gas_cost)
-            .saturating_mul(one_mill)
-            / U256::from(proof_res.stats.total_cycles);
-
-        tracing::debug!(
-            "Order {order_id} price: {}-{} ETH, {}-{} ETH per mcycle, {} stake required, {} ETH gas cost",
-            format_ether(U256::from(order.request.offer.minPrice)),
-            format_ether(U256::from(order.request.offer.maxPrice)),
-            format_ether(mcycle_price_min),
-            format_ether(mcycle_price_max),
-            format_units(U256::from(order.request.offer.lockStake), self.stake_token_decimals).unwrap_or_default(),
-            format_ether(order_gas_cost),
-        );
-
-        // Skip the order if it will never be worth it
-        if mcycle_price_max < config_min_mcycle_price {
-            tracing::debug!("Removing under priced order {order_id}");
-            return Ok(Skip);
-        }
-
-        let target_timestamp_secs = if mcycle_price_min >= config_min_mcycle_price {
-            tracing::info!(
-                "Selecting order {order_id} at price {} - ASAP",
-                format_ether(U256::from(order.request.offer.minPrice))
-            );
-            0 // Schedule the lock ASAP
-        } else {
-            
-            tracing::info!(
-                "INSTANT LOCK: Selecting order {order_id} at min price {} - ZKC Season Mode",
-                format_ether(U256::from(order.request.offer.minPrice))
-            );
-            0 // 항상 즉시 잠금
-        };
-
-        let expiry_secs = order.request.offer.biddingStart + order.request.offer.lockTimeout as u64;
-
-        Ok(Lock { total_cycles: proof_res.stats.total_cycles, target_timestamp_secs, expiry_secs })
+        // 수익성 무시하고 즉시 락
+        Ok(Lock {
+            total_cycles: proof_res.stats.total_cycles,
+            target_timestamp_secs: 0, // 즉시 실행
+            // 수정: rampUpStart → biddingStart
+            expiry_secs: order.request.offer.biddingStart + order.request.offer.lockTimeout as u64,
+        })
     }
 
     /// Evaluate if a lock expired order is worth picking based on how much of the slashed stake token we can recover
@@ -839,6 +491,7 @@ where
     async fn available_stake_balance(&self) -> Result<U256> {
         let balance = self.market.balance_of_stake(self.provider.default_signer_address()).await?;
         Ok(balance)
+
     }
 
     /// Calculates the cycle limit for the preflight and also for the max cycles that this specific
