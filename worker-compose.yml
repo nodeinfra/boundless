@@ -1,0 +1,78 @@
+name: bento-worker
+# Worker node configuration - runs agents that connect to master node
+
+# Anchors:
+x-base-environment: &base-environment
+  DATABASE_URL: postgresql://${POSTGRES_USER:-worker}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-taskdb}
+  REDIS_URL: redis://${REDIS_HOST}:6379
+  S3_URL: http://${MINIO_HOST}:9000
+  S3_BUCKET: ${MINIO_BUCKET:-workflow}
+  S3_ACCESS_KEY: ${MINIO_ROOT_USER:-admin}
+  S3_SECRET_KEY: ${MINIO_ROOT_PASS:-password}
+  RUST_LOG: ${RUST_LOG:-info}
+  RISC0_HOME: /usr/local/risc0
+  RUST_BACKTRACE: 1
+  POVW_LOG_ID: ${POVW_LOG_ID:-}
+
+x-agent-common: &agent-common
+  runtime: nvidia
+  build:
+    context: .
+    dockerfile: ${AGENT_DOCKERFILE:-dockerfiles/agent.dockerfile}
+  restart: always
+  environment:
+    <<: *base-environment
+  network_mode: host
+
+x-exec-agent-common: &exec-agent-common
+  <<: *agent-common
+  mem_limit: 4G
+  cpus: 3
+  environment:
+    <<: *base-environment
+    RISC0_KECCAK_PO2: ${RISC0_KECCAK_PO2:-17}
+  entrypoint: /app/agent -t exec --segment-po2 ${SEGMENT_SIZE:-21} --redis-ttl ${REDIS_TTL:-57600}
+
+services:
+  exec_agent0:
+    <<: *exec-agent-common
+
+  exec_agent1:
+    <<: *exec-agent-common
+
+  exec_agent2:
+    <<: *exec-agent-common
+
+  exec_agent3:
+    <<: *exec-agent-common
+
+  exec_agent4:
+    <<: *exec-agent-common
+
+  exec_agent5:
+    <<: *exec-agent-common
+
+
+
+  aux_agent:
+    <<: *agent-common
+    mem_limit: 256M
+    cpus: 1
+    environment:
+      <<: *base-environment
+    entrypoint: /app/agent -t aux --monitor-requeue --redis-ttl ${REDIS_TTL:-57600}
+
+  # GPU proving agents - adjust based on available GPUs
+  gpu_prove_agent0:
+    <<: *agent-common
+    mem_limit: 16G
+    cpus: 4
+    entrypoint: /app/agent -t prove --redis-ttl ${REDIS_TTL:-57600}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["0"]
+              capabilities: [gpu]
+
