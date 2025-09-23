@@ -44,10 +44,7 @@ def reset_order(order_id: str, original_line: str):
         # Capture logs for selected containers (last 3 min)
         containers = [
             "bento-broker-1",
-            "bento-rest_api-1",
-            "bento-gpu_prove_agent0-1",
-            "bento-aux_agent-1",
-        ] + [f"bento-exec_agent{i}-1" for i in range(0,5)]
+        ]
         for c in containers:
             try:
                 logs_out = subprocess.check_output(
