@@ -69,32 +69,6 @@ def reset_order(order_id: str, original_line: str):
     except subprocess.CalledProcessError as e:
         print(f"[auto-reset] Failed to reset order {order_id}: {e}", file=sys.stderr, flush=True)
 
-    # Send Telegram notification (optional)
-    try:
-        import requests
-        tg_env = {}
-        try:
-            with open(os.path.join(os.path.dirname(__file__), ".env.tg")) as envf:
-                for line in envf:
-                    if "=" in line and not line.strip().startswith("#"):
-                        k,v = line.strip().split("=",1)
-                        tg_env[k.strip()] = v.strip()
-        except Exception as e:
-            print(f"[auto-reset] Could not read .env.tg: {e}", file=sys.stderr, flush=True)
-            tg_env = {}
-
-        token = tg_env.get("TG_TOKEN")
-        chat_id = tg_env.get("TG_CHAT_ID")
-
-        if token and chat_id:
-            msg = f"Reset order id {order_id}"
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            resp = requests.post(url, data={"chat_id": chat_id, "text": msg})
-            if resp.status_code != 200:
-                print(f"[auto-reset] Telegram send failed: {resp.text}", file=sys.stderr, flush=True)
-    except Exception as e:
-        print(f"[auto-reset] Exception sending Telegram message: {e}", file=sys.stderr, flush=True)
-
 def main():
     for line in sys.stdin:
         if (
