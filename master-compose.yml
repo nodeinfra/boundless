@@ -1,4 +1,4 @@
-name: bento-master
+name: bento
 # Master node configuration - runs broker, redis, postgresql, minio, rest_api
 
 # Anchors:

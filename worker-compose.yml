@@ -1,4 +1,4 @@
-name: bento-worker
+name: bento
 # Worker node configuration - runs agents that connect to master node
 
 # Anchors:
