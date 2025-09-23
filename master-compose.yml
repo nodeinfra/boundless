@@ -39,7 +39,6 @@ x-broker-common: &broker-common
       condition: service_healthy
     postgres:
       condition: service_healthy
-  profiles: [broker]
   build:
     context: .
     dockerfile: ${BROKER_DOCKERFILE:-dockerfiles/broker.prebuilt.dockerfile}
