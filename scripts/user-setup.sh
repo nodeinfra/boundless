@@ -316,11 +316,11 @@ install_risc_zero() {
             break
         elif [[ $attempt -eq 3 ]]; then
             # Last attempt: check if binary exists and force add to PATH
-            if [[ -x "$HOME/.rzup/bin/rzup" ]]; then
-                export PATH="$HOME/.rzup/bin:$PATH"
+            if [[ -x "$HOME/.risc0/bin/rzup" ]]; then
+                export PATH="$HOME/.risc0/bin:$PATH"
                 warning "rzup binary exists but required manual PATH addition"
             else
-                error "rzup binary not found at $HOME/.rzup/bin/rzup"
+                error "rzup binary not found at $HOME/.risc/bin/rzup"
                 warning "RISC Zero installation may have failed"
                 return 1
             fi
