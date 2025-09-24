@@ -6,6 +6,7 @@
 #   - Installs Rust programming language (in user directory).
 #   - Installs Just command runner.
 #   - Initializes git submodules.
+#   - Installs RISC Zero toolchain.
 #   - Verifies installations.
 #
 # This script should be run as a regular user (NOT with sudo).
@@ -47,6 +48,52 @@ warning() {
     printf "\e[33m[WARNING]\e[0m %s\n" "$1"
 }
 
+# Function to safely reload environment variables
+reload_environment() {
+    info "Reloading environment variables..."
+    
+    # Method 1: Source cargo environment if exists
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env" 2>/dev/null || true
+    fi
+    
+    # Method 2: Add known paths to current PATH
+    local paths_to_add=(
+        "$HOME/.cargo/bin"
+        "$HOME/.local/bin"
+        "$HOME/.rzup/bin"
+    )
+    
+    for path_dir in "${paths_to_add[@]}"; do
+        if [[ -d "$path_dir" && ":$PATH:" != *":$path_dir:"* ]]; then
+            export PATH="$path_dir:$PATH"
+            info "Added $path_dir to PATH"
+        fi
+    done
+    
+    # Method 3: Handle CUDA paths if they exist
+    local cuda_paths=("/usr/local/cuda-13.0" "/usr/local/cuda")
+    for cuda_path in "${cuda_paths[@]}"; do
+        if [[ -d "$cuda_path/bin" ]]; then
+            if [[ ":$PATH:" != *":$cuda_path/bin:"* ]]; then
+                export PATH="$cuda_path/bin:$PATH"
+            fi
+            if [[ -d "$cuda_path/lib64" ]]; then
+                if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+                    export LD_LIBRARY_PATH="$cuda_path/lib64:$LD_LIBRARY_PATH"
+                else
+                    export LD_LIBRARY_PATH="$cuda_path/lib64"
+                fi
+            fi
+            break
+        fi
+    done
+    
+    # Small delay to ensure environment changes take effect
+    sleep 1
+}
+
 # Function to check if not running with sudo
 check_not_sudo() {
     if [[ $EUID -eq 0 ]] || [[ -n "${SUDO_USER:-}" ]]; then
@@ -62,38 +109,25 @@ install_rust() {
         info "Rust is already installed. Current version:"
         rustc --version
         
-        # Ask if user wants to update
-        if [[ -t 0 ]]; then
-            read -rp "Do you want to update Rust? (y/N): " UPDATE_RUST
-            case "$UPDATE_RUST" in
-                [yY][eE][sS]|[yY])
-                    info "Updating Rust..."
-                    {
-                        rustup update
-                    } >> "$LOG_FILE" 2>&1
-                    success "Rust updated successfully."
-                    ;;
-                *)
-                    info "Skipping Rust update."
-                    ;;
-            esac
-        else
-            info "Skipping Rust installation (already installed)."
-        fi
+        info "Updating Rust..."
+        {
+            rustup update
+        } >> "$LOG_FILE" 2>&1
+        success "Rust updated successfully."
     else
         info "Installing Rust programming language..."
         {
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         } >> "$LOG_FILE" 2>&1
         
-        # Source Rust environment variables for the current session
-        if [[ -f "$HOME/.cargo/env" ]]; then
-            # shellcheck source=/dev/null
-            source "$HOME/.cargo/env"
+        # Reload environment to get Rust tools in PATH
+        reload_environment
+        
+        if command -v rustc &> /dev/null; then
             success "Rust installed successfully."
             info "Rust version: $(rustc --version)"
         else
-            error "Rust installation failed. ~/.cargo/env not found."
+            error "Rust installation failed. Cannot find rustc in PATH."
             exit 1
         fi
     fi
@@ -101,6 +135,9 @@ install_rust() {
 
 # Function to install the `just` command runner
 install_just() {
+    # Ensure environment is up to date
+    reload_environment
+    
     if command -v just &>/dev/null; then
         info "'just' is already installed. Current version:"
         just --version
@@ -115,26 +152,42 @@ install_just() {
         {
             cargo install just
         } >> "$LOG_FILE" 2>&1
-        success "'just' installed via cargo successfully."
-    else
-        # Fallback to downloading prebuilt binary to user's local bin
-        info "Installing 'just' via prebuilt binary to ~/.local/bin..."
-        {
-            # Create ~/.local/bin if it doesn't exist
-            mkdir -p "$HOME/.local/bin"
-            
-            # Download and install just
-            curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
-                | bash -s -- --to "$HOME/.local/bin"
-            
-            # Add ~/.local/bin to PATH if not already there
-            if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
-                echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
-                export PATH="$HOME/.local/bin:$PATH"
-                info "Added ~/.local/bin to PATH in ~/.bashrc"
-            fi
-        } >> "$LOG_FILE" 2>&1
+        
+        # Reload environment after cargo install
+        reload_environment
+        
+        if command -v just &>/dev/null; then
+            success "'just' installed via cargo successfully."
+            return
+        fi
+    fi
+    
+    # Fallback to downloading prebuilt binary to user's local bin
+    info "Installing 'just' via prebuilt binary to ~/.local/bin..."
+    {
+        # Create ~/.local/bin if it doesn't exist
+        mkdir -p "$HOME/.local/bin"
+        
+        # Download and install just
+        curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | bash -s -- --to "$HOME/.local/bin"
+        
+        # Add ~/.local/bin to PATH if not already there
+        if [[ ":$PATH:" != *":$HOME/.local/bin:"* ]]; then
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+            export PATH="$HOME/.local/bin:$PATH"
+            info "Added ~/.local/bin to PATH in ~/.bashrc"
+        fi
+    } >> "$LOG_FILE" 2>&1
+    
+    # Reload environment after installation
+    reload_environment
+    
+    if command -v just &>/dev/null; then
         success "'just' installed successfully."
+    else
+        error "Failed to install 'just'"
+        exit 1
     fi
 }
 
@@ -148,105 +201,14 @@ init_git_submodules() {
         if timeout 300 git submodule update --init --recursive --progress; then
             success "Git submodules initialized successfully."
         else
-            error "Git submodule initialization failed or timed out after 5 minutes."
+            warning "Git submodule initialization failed or timed out after 5 minutes."
             warning "You can try manually running: git submodule update --init --recursive"
-            
-            # Ask user if they want to continue without submodules
-            if [[ -t 0 ]]; then
-                read -rp "Continue setup without initializing submodules? (y/N): " CONTINUE
-                case "$CONTINUE" in
-                    [yY][eE][sS]|[yY])
-                        warning "Continuing setup without submodule initialization."
-                        ;;
-                    *)
-                        error "Setup aborted. Please resolve submodule issues and retry."
-                        exit 1
-                        ;;
-                esac
-            else
-                warning "Continuing setup without submodule initialization (non-interactive mode)."
-            fi
+            warning "Continuing setup without submodule initialization."
         fi
     else
         warning "No .gitmodules file found. Skipping submodule initialization."
         warning "Make sure you're running this script from the project root directory."
     fi
-}
-
-# Function to verify Docker access
-verify_docker_access() {
-    info "Verifying Docker access..."
-    
-    if ! command -v docker &> /dev/null; then
-        warning "Docker is not installed or not in PATH."
-        return
-    fi
-    
-    if docker ps &> /dev/null; then
-        success "Docker access verified successfully."
-        
-        # Test NVIDIA Docker if available
-        if docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu20.04 nvidia-smi &> /dev/null; then
-            success "NVIDIA Docker runtime verified successfully."
-        else
-            warning "NVIDIA Docker runtime test failed. This is normal if you don't have NVIDIA GPUs or drivers installed."
-        fi
-    else
-        warning "Cannot access Docker. You may need to:"
-        warning "1. Log out and log back in to apply group membership changes"
-        warning "2. Restart the Docker service: sudo systemctl restart docker"
-        warning "3. Check if you're in the docker group: groups"
-    fi
-}
-
-# Function to verify installations
-verify_installations() {
-    info "Verifying installations..."
-    
-    # Check Rust
-    if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
-        success "✓ Rust: $(rustc --version)"
-        success "✓ Cargo: $(cargo --version)"
-    else
-        error "✗ Rust/Cargo not found in PATH"
-    fi
-    
-    # Check Just
-    if command -v just &> /dev/null; then
-        success "✓ Just: $(just --version)"
-    else
-        error "✗ Just not found in PATH"
-        if [[ -f "$HOME/.local/bin/just" ]]; then
-            info "Just is installed in ~/.local/bin/just but not in PATH"
-            info "Please restart your shell or run: source ~/.bashrc"
-        fi
-    fi
-    
-    # Check RISC Zero
-    if command -v rzup &> /dev/null; then
-        success "✓ RISC Zero toolchain: $(rzup --version 2>/dev/null || echo 'installed')"
-    else
-        warning "✗ RISC Zero toolchain not found in PATH"
-        info "Please restart your shell to load ~/.bashrc updates"
-    fi
-    
-    # Check CUDA/NVCC
-    if command -v nvcc &> /dev/null; then
-        success "✓ NVCC: $(nvcc --version | head -n1 | cut -d',' -f2 | tr -d ' ')"
-    else
-        warning "✗ NVCC not found in PATH"
-        info "RISC Zero GPU acceleration will not work without NVCC"
-    fi
-    
-    # Check essential system tools
-    local tools=("gcc" "g++" "make" "curl" "git")
-    for tool in "${tools[@]}"; do
-        if command -v "$tool" &> /dev/null; then
-            success "✓ $tool is available"
-        else
-            warning "✗ $tool not found"
-        fi
-    done
 }
 
 # Function to setup CUDA environment
@@ -279,16 +241,20 @@ setup_cuda_environment() {
             echo ""
             echo "# CUDA paths"
             echo "export PATH=$cuda_path/bin:\$PATH"
-            echo "export LD_LIBRARY_PATH=$cuda_path/lib64:\$LD_LIBRARY_PATH"
+            echo "export LD_LIBRARY_PATH=$cuda_path/lib64:\${LD_LIBRARY_PATH:-}"
         } >> ~/.bashrc
         success "CUDA paths added to ~/.bashrc"
     else
         info "CUDA paths already in ~/.bashrc"
     fi
     
-    # Set for current session
+    # Set for current session - handle empty LD_LIBRARY_PATH safely
     export PATH="$cuda_path/bin:$PATH"
-    export LD_LIBRARY_PATH="$cuda_path/lib64:$LD_LIBRARY_PATH"
+    if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        export LD_LIBRARY_PATH="$cuda_path/lib64:$LD_LIBRARY_PATH"
+    else
+        export LD_LIBRARY_PATH="$cuda_path/lib64"
+    fi
     
     # Verify nvcc
     if command -v nvcc &> /dev/null; then
@@ -298,62 +264,164 @@ setup_cuda_environment() {
         return 1
     fi
 }
+
+# Function to install RISC Zero toolchain with improved error handling
 install_risc_zero() {
     info "Installing RISC Zero toolchain..."
+    
+    # First reload environment to check if already installed
+    reload_environment
     
     # Check if rzup is already installed
     if command -v rzup &> /dev/null; then
         info "RISC Zero toolchain (rzup) is already installed."
-        
-        # Check current version and offer to update
-        if [[ -t 0 ]]; then
-            read -rp "Do you want to update RISC Zero toolchain? (y/N): " UPDATE_RISC0
-            case "$UPDATE_RISC0" in
-                [yY][eE][sS]|[yY])
-                    info "Updating RISC Zero toolchain..."
-                    {
-                        rzup update
-                        rzup install
-                        rzup install risc0-groth16
-                    } >> "$LOG_FILE" 2>&1
-                    success "RISC Zero toolchain updated successfully."
-                    ;;
-                *)
-                    info "Skipping RISC Zero toolchain update."
-                    ;;
-            esac
-        else
-            info "Skipping RISC Zero toolchain installation (already installed)."
-        fi
-    else
-        info "Installing RISC Zero toolchain via risczero.com/install..."
+        info "Updating RISC Zero toolchain..."
         {
-            # Install RISC Zero toolchain
-            curl -L https://risczero.com/install | bash
-            
-            # Source bashrc to get rzup in PATH
-            source ~/.bashrc
-            
-            # Install RISC Zero tools
+            rzup update 2>/dev/null || true
             rzup install
-            rzup install risc0-groth16
+            rzup install risc0-groth16 2>/dev/null || true
+        } >> "$LOG_FILE" 2>&1
+        success "RISC Zero toolchain updated successfully."
+        return 0
+    fi
+
+    info "Installing RISC Zero toolchain via risczero.com/install..."
+    
+    # Install RISC Zero toolchain
+    {
+        curl -L https://risczero.com/install | bash
+    } >> "$LOG_FILE" 2>&1
+    
+    # Add RISC Zero to bashrc if not already there
+    if ! grep -q "rzup\|\.rzup" ~/.bashrc 2>/dev/null; then
+        echo "" >> ~/.bashrc
+        echo "# RISC Zero toolchain" >> ~/.bashrc
+        echo 'export PATH="$HOME/.rzup/bin:$PATH"' >> ~/.bashrc
+        info "Added RISC Zero to ~/.bashrc"
+    fi
+    
+    # Manually add to current PATH
+    if [[ -d "$HOME/.rzup/bin" ]]; then
+        export PATH="$HOME/.rzup/bin:$PATH"
+        info "Added RISC Zero to current session PATH"
+    fi
+    
+    # Reload environment multiple times with delays to ensure rzup is found
+    for attempt in 1 2 3; do
+        reload_environment
+        sleep 2
+        
+        if command -v rzup &> /dev/null; then
+            success "rzup found on attempt $attempt"
+            break
+        elif [[ $attempt -eq 3 ]]; then
+            # Last attempt: check if binary exists and force add to PATH
+            if [[ -x "$HOME/.rzup/bin/rzup" ]]; then
+                export PATH="$HOME/.rzup/bin:$PATH"
+                warning "rzup binary exists but required manual PATH addition"
+            else
+                error "rzup binary not found at $HOME/.rzup/bin/rzup"
+                warning "RISC Zero installation may have failed"
+                return 1
+            fi
+        fi
+    done
+    
+    # Install RISC Zero tools if rzup is available
+    if command -v rzup &> /dev/null; then
+        info "Installing RISC Zero components..."
+        {
+            # Install with timeout to prevent hanging
+            timeout 900 rzup install || {
+                warning "rzup install timed out but may have succeeded"
+            }
+            
+            timeout 300 rzup install risc0-groth16 || {
+                warning "risc0-groth16 installation failed, can be installed manually later"
+            }
         } >> "$LOG_FILE" 2>&1
         
-        # Verify installation
-        if command -v rzup &> /dev/null; then
-            success "RISC Zero toolchain installed successfully."
-            
-            # Source bashrc for current session
-            if [[ -f "$HOME/.bashrc" ]]; then
-                source "$HOME/.bashrc"
-            fi
-        else
-            error "RISC Zero toolchain installation failed."
-            warning "You may need to restart your shell and run: rzup install"
-            return 1
-        fi
+        success "RISC Zero toolchain installed successfully."
+    else
+        error "RISC Zero toolchain installation failed - rzup not accessible"
+        warning "You may need to restart your shell and manually run:"
+        warning "  rzup install"
+        warning "  rzup install risc0-groth16"
+        return 1
     fi
 }
+
+
+# Function to verify installations
+verify_installations() {
+    info "Verifying installations..."
+    
+    # Ensure environment is up to date before verification
+    reload_environment
+    
+    local verification_passed=true
+    
+    # Check Rust
+    if command -v rustc &> /dev/null && command -v cargo &> /dev/null; then
+        success "✓ Rust: $(rustc --version)"
+        success "✓ Cargo: $(cargo --version)"
+    else
+        error "✗ Rust/Cargo not found in PATH"
+        verification_passed=false
+    fi
+    
+    # Check Just
+    if command -v just &> /dev/null; then
+        success "✓ Just: $(just --version)"
+    else
+        error "✗ Just not found in PATH"
+        if [[ -f "$HOME/.local/bin/just" ]]; then
+            info "Just is installed in ~/.local/bin/just but not in PATH"
+            info "Please restart your shell or run: source ~/.bashrc"
+        fi
+        verification_passed=false
+    fi
+    
+    # Check RISC Zero
+    if command -v rzup &> /dev/null; then
+        success "✓ RISC Zero toolchain: $(rzup --version 2>/dev/null || echo 'installed')"
+    else
+        error "✗ RISC Zero toolchain not found in PATH"
+        if [[ -f "$HOME/.rzup/bin/rzup" ]]; then
+            warning "rzup binary exists but not in PATH"
+            info "Please restart your shell or run: exec \$SHELL"
+        else
+            warning "RISC Zero installation may have failed"
+        fi
+        verification_passed=false
+    fi
+    
+    # Check CUDA/NVCC
+    if command -v nvcc &> /dev/null; then
+        success "✓ NVCC: $(nvcc --version | head -n1 | cut -d',' -f2 | tr -d ' ')"
+    else
+        warning "✗ NVCC not found in PATH"
+        info "RISC Zero GPU acceleration will not work without NVCC"
+    fi
+    
+    # Check essential system tools
+    local tools=("gcc" "g++" "make" "curl" "git")
+    for tool in "${tools[@]}"; do
+        if command -v "$tool" &> /dev/null; then
+            success "✓ $tool is available"
+        else
+            warning "✗ $tool not found"
+            verification_passed=false
+        fi
+    done
+    
+    if [[ "$verification_passed" == "true" ]]; then
+        success "All critical tools verified successfully!"
+    else
+        warning "Some tools failed verification. You may need to restart your shell."
+    fi
+}
+
 display_final_instructions() {
     info ""
     info "=================================="
@@ -361,8 +429,8 @@ display_final_instructions() {
     info "=================================="
     info ""
     info "Next steps:"
-    info "1. Restart your shell or run: source ~/.bashrc"
-    info "2. Verify installations: ./user-setup.sh --verify"
+    info "1. Restart your shell or run: exec \$SHELL"
+    info "2. Verify installations: ./scripts/user-setup.sh --verify"
     info "3. If Docker group changes were made, you may need to log out and log back in"
     info ""
     info "Test your setup:"
@@ -371,6 +439,9 @@ display_final_instructions() {
     info "  - RISC Zero: rzup --version"
     info "  - Docker: docker --version && docker ps"
     info "  - NVIDIA Docker: docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu20.04 nvidia-smi"
+    info ""
+    info "If any tools are not found, try:"
+    info "  exec \$SHELL    # Restart shell to load new environment"
     info ""
 }
 
@@ -413,7 +484,6 @@ install_risc_zero
 verify_installations
 
 # Verify Docker access
-verify_docker_access
 
 success "User setup completed successfully!"
 

@@ -274,7 +274,7 @@ configure_docker_nvidia() {
 EOF
 
         # Restart Docker to apply the new configuration
-        systemctl restart docker
+        sudo systemctl restart docker
     } >> "$LOG_FILE" 2>&1
 
     success "Docker configured to use NVIDIA runtime by default."
