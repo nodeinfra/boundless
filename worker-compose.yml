@@ -16,9 +16,7 @@ x-base-environment: &base-environment
 
 x-agent-common: &agent-common
   runtime: nvidia
-  build:
-    context: .
-    dockerfile: ${AGENT_DOCKERFILE:-dockerfiles/agent.dockerfile}
+  image: 192.168.20.13:5000/boundless-agent:v1.0.0
   restart: always
   environment:
     <<: *base-environment

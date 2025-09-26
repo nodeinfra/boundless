@@ -269,7 +269,8 @@ configure_docker_nvidia() {
             "path": "nvidia-container-runtime",
             "runtimeArgs": []
         }
-    }
+    },
+    "insecure-registries": ["192.168.20.12:5000"]
 }
 EOF
 
