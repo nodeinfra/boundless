@@ -16,7 +16,7 @@ x-base-environment: &base-environment
 
 x-agent-common: &agent-common
   runtime: nvidia
-  image: 192.168.20.13:5000/boundless-agent:v1.0.0
+  image: 176.124.69.199:5000/boundless-agent:v1.0.0
   restart: always
   environment:
     <<: *base-environment
