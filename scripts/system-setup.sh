@@ -270,7 +270,7 @@ configure_docker_nvidia() {
             "runtimeArgs": []
         }
     },
-    "insecure-registries": ["176.124.69.199:5000"]
+    "insecure-registries": ["192.168.20.12:5000"]
 }
 EOF
 
