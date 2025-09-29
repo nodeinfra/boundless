@@ -225,31 +225,47 @@ add_user_to_docker_group() {
 install_nvidia_container_toolkit() {
     info "Checking NVIDIA Container Toolkit installation..."
 
-    if is_package_installed "nvidia-docker2"; then
-        success "NVIDIA Container Toolkit (nvidia-docker2) is already installed."
+    # Check if already installed
+    if command -v nvidia-ctk >/dev/null 2>&1 && is_package_installed "nvidia-container-toolkit"; then
+        success "NVIDIA Container Toolkit is already installed."
+
+        # Ensure runtime is configured
+        info "Configuring NVIDIA Container Runtime..."
+        nvidia-ctk runtime configure --runtime=docker
+        systemctl restart docker
         return
     fi
 
     info "Installing NVIDIA Container Toolkit..."
 
     {
-        # Add the package repositories
-        local distribution
-        distribution=$(grep '^ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')$(grep '^VERSION_ID=' /etc/os-release | cut -d'=' -f2 | tr -d '"')
-        curl -s -L https://nvidia.github.io/nvidia-docker/gpgkey | apt-key add -
-        curl -s -L https://nvidia.github.io/nvidia-docker/"$distribution"/nvidia-docker.list | tee /etc/apt/sources.list.d/nvidia-docker.list
+        # Configure the production repository
+        curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+        && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+            sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+            tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 
-        # Update the package lists
-        apt update -y
+        # Update the packages list from the repository
+        apt-get update -y
 
-        # Install the NVIDIA Docker support
-        apt install -y nvidia-docker2
--
-        # Restart Docker to apply changes
+        # Install the NVIDIA Container Toolkit packages
+        apt-get install -y nvidia-container-toolkit
+
+        # Configure the container runtime
+        nvidia-ctk runtime configure --runtime=docker
+
+        # Restart the Docker daemon
         systemctl restart docker
+
     } >> "$LOG_FILE" 2>&1
 
-    success "NVIDIA Container Toolkit installed successfully."
+    # Verify installation
+    if command -v nvidia-ctk >/dev/null 2>&1; then
+        success "NVIDIA Container Toolkit installed and configured successfully."
+    else
+        error "Failed to install NVIDIA Container Toolkit."
+        return 1
+    fi
 }
 
 # Function to configure Docker daemon for NVIDIA
