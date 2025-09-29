@@ -244,7 +244,7 @@ install_nvidia_container_toolkit() {
 
         # Install the NVIDIA Docker support
         apt install -y nvidia-docker2
-
+-
         # Restart Docker to apply changes
         systemctl restart docker
     } >> "$LOG_FILE" 2>&1
@@ -270,7 +270,7 @@ configure_docker_nvidia() {
             "runtimeArgs": []
         }
     },
-    "insecure-registries": ["192.168.20.12:5000"]
+    "insecure-registries": ["172.30.0.12:5000"]
 }
 EOF
 
