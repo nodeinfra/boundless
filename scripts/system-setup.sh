@@ -345,7 +345,7 @@ install_nvidia_container_toolkit
 configure_docker_nvidia
 
 # Install CUDA Toolkit
-install_cuda
+# install_cuda
 
 # Cleanup
 cleanup
